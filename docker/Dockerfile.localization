@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ros:humble-desktop
+FROM osrf/ros:humble-desktop
 
 ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-c"]
@@ -30,8 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-rosdep \
     python3-vcstool \
     python3-argcomplete \
-    libc++-dev \
-    libc++abi-dev \
     libeigen3-dev \
     libpcl-dev \
     libgoogle-glog-dev \
@@ -96,6 +94,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ccache \
     && rm -rf /var/lib/apt/lists/*
 
+# NOTE: -DGLIBCXX_USE_CXX11_ABI=ON below is REQUIRED. Open3D 0.14.1 defaults to
+# the OLD C++ string ABI (=0) and forces it onto every consumer via its CMake
+# config; ROS 2 Humble's rclcpp is built with the NEW ABI (=1). Without this
+# flag, open3d_loc compiles old-ABI and fails to link rclcpp (undefined
+# 'Ss'-mangled std::string symbols at link time).
 RUN git clone --recursive --branch v0.14.1 --depth 1 \
       https://github.com/isl-org/Open3D.git /tmp/Open3D && \
     cd /tmp/Open3D && \
@@ -105,6 +108,7 @@ RUN git clone --recursive --branch v0.14.1 --depth 1 \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=/opt/open3d-0.14.1 \
       -DBUILD_SHARED_LIBS=ON \
+      -DGLIBCXX_USE_CXX11_ABI=ON \
       -DBUILD_PYTHON_MODULE=OFF \
       -DBUILD_EXAMPLES=OFF \
       -DBUILD_UNIT_TESTS=OFF \
@@ -129,13 +133,17 @@ ENV CMAKE_PREFIX_PATH=/opt/open3d-0.14.1:${CMAKE_PREFIX_PATH}
 ENV LD_LIBRARY_PATH=/opt/open3d-0.14.1/lib:${LD_LIBRARY_PATH}
 
 # ----------------------------------------------------------------------
-# Install Livox-SDK
-# Required by older Livox ROS driver / FAST-LIO setups
+# Install Livox-SDK (SDK1)
+# Not used by the MID-360 path (livox_ros_driver2 links Livox-SDK2 below), but
+# kept for older Livox ROS driver / FAST-LIO setups. Livox-SDK predates GCC 11:
+# several headers use std::shared_ptr without #include <memory> (newer libstdc++
+# no longer pulls it in transitively) and the SDK builds with -Werror, so the
+# stock build fails on Ubuntu 22.04. Force-include <memory> to fix it.
 # ----------------------------------------------------------------------
 RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK.git /tmp/Livox-SDK && \
     cd /tmp/Livox-SDK && \
     mkdir -p build && cd build && \
-    cmake .. && \
+    cmake .. -DCMAKE_CXX_FLAGS="-include memory" && \
     make -j"$(nproc)" && \
     make install && \
     ldconfig && \

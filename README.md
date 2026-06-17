@@ -155,4 +155,7 @@ build_ws        # rosdep + colcon; build/ install/ log/ persist on the host (git
 
 - [docs/system_architecture.md](docs/system_architecture.md) — end-to-end stack and data flow.
 - [docs/dockerfiles.md](docs/dockerfiles.md) — the three-image framework.
+- [docs/simulation_stack.md](docs/simulation_stack.md) — how the stack is wrapped into Isaac Sim (sim front-end).
 - [docs/amo_inference_plan.md](docs/amo_inference_plan.md) — AMO inference and the joint-smoothing filter.
+
+The Isaac Sim simulation entrypoint lives in [sim/](sim/) — see [sim/README.md](sim/README.md).

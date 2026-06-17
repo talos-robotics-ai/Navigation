@@ -84,4 +84,7 @@ services:
       # Locally-editable FAST-LIO workspace. Build once inside the container
       # with `build_ws` (rosdep + colcon); install/ + build/ persist on the host.
       - ../ros2_ws:/ws
+      # Sim helpers (verify_topics.sh etc.) for checking Isaac's topics from
+      # inside the container. Read-only; Isaac itself runs on the host.
+      - ../sim:/sim:ro
     command: bash

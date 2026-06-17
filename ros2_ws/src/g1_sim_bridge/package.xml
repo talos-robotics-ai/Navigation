@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>g1_sim_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    Isaac Sim -> FAST-LIO bridge (simulation only). Converts the Isaac Sim
+    MID-360 output (/livox/lidar PointCloud2 + /livox/imu_raw Imu) into the
+    livox_ros_driver2/CustomMsg on /livox/custom_msg and a RELIABLE
+    /livox/imu, exactly as FAST_LIO_LOCALIZATION_HUMANOID (lidar_type:1)
+    expects. Not used on the real robot, where the Livox SDK driver emits
+    CustomMsg + /livox/imu natively.
+  </description>
+  <maintainer email="lorenzo.ortolani@talosrobotics.ai">Lorenzo Ortolani</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>sensor_msgs_py</depend>
+  <depend>livox_ros_driver2</depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>fast_lio</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+</package>

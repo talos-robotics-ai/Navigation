@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ros:humble-desktop
+FROM osrf/ros:humble-desktop
 
 ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-c"]
