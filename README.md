@@ -10,7 +10,7 @@ gait policy used for real-robot walking.
 Navigation/
 ├── docker/
 │   ├── Dockerfile.unitree        # Unitree SDK2 (C++) + unitree_ros2, teleop, RViz
-│   ├── Dockerfile.localization   # FAST-LIO localization (Open3D, Livox SDK, PCL)
+│   ├── Dockerfile.localization   # DLIO localization (PCL, Eigen, OpenMP, Livox-SDK2)
 │   ├── Dockerfile.amo_policy     # RoboJuDo AMO RL gait (pure-Python DDS, no ROS 2)
 │   ├── docker-compose.yml        # the three services
 │   ├── run_amo.sh                # launch AMO inference via compose (forwards args)
@@ -25,12 +25,12 @@ Navigation/
 │   └── tests/test_joint_filters.py
 ├── ros2_ws/                      # locally-editable ROS 2 workspace (mounted to /ws)
 │   └── src/
-│       ├── FAST_LIO_LOCALIZATION_HUMANOID   # FAST-LIO localization
+│       ├── direct_lidar_inertial_odometry  # DLIO (UCLA VECTR) LiDAR-inertial odometry
 │       └── livox_ros_driver2                # MID-360 ROS 2 driver (tuned config)
 ├── policy/
 │   └── RoboJuDo -> ../../RoboJuDo # symlink to the RoboJuDo deploy framework
 └── docs/
-    ├── system_architecture.md    # end-to-end stack (LiDAR → FAST-LIO → MPC → AMO)
+    ├── system_architecture.md    # end-to-end stack (LiDAR → DLIO → MPC → AMO)
     ├── dockerfiles.md            # how the three images fit together
     └── amo_inference_plan.md     # AMO inference + joint-smoothing filter design
 ```
@@ -40,7 +40,7 @@ Navigation/
 | Image | Base | Role |
 |---|---|---|
 | **unitree** | `ros:humble-desktop` | ROS 2 ↔ robot bridge: Unitree SDK2, message packages, teleop, joystick, RViz. |
-| **localization** | `ros:humble-desktop` | FAST-LIO LiDAR-inertial localization for the MID-360 (Open3D 0.14.1, Livox SDK 1/2, PCL). |
+| **localization** | `ros:humble-desktop` | DLIO LiDAR-inertial odometry/localization for the MID-360 (PCL, Eigen, OpenMP, Livox-SDK2). |
 | **amo_policy** | `python:3.11-slim-bookworm` | The RoboJuDo **AMO RL gait** that drives the joints, over CycloneDDS via `unitree_sdk2py`. **No ROS 2.** |
 
 They are independent and communicate at run time over CycloneDDS and ROS 2 /
@@ -70,15 +70,15 @@ NIC, mounts the `amo/` code + RoboJuDo + config, and forwards all args to
 ```bash
 cd Navigation/docker
 
-BUILD=1 NET_IF=eth0 ./run_amo.sh --observe_only   # build, then dry run (no motor cmds)
-NET_IF=eth0 ./run_amo.sh                           # run with amo_g1.yaml as-is (stands)
-NET_IF=eth0 ./run_amo.sh --vx 0.3                  # walk forward at a constant velocity
+BUILD=1 NET_IF=enp12s0 ./run_amo.sh --observe_only   # build, then dry run (no motor cmds)
+NET_IF=enp12s0 ./run_amo.sh                           # run with amo_g1.yaml as-is (stands)
+NET_IF=enp12s0 ./run_amo.sh --vx 0.3                  # walk forward at a constant velocity
 ```
 
 Equivalent raw compose call:
 
 ```bash
-UNITREE_NET_IFACE=eth0 docker compose run --rm --service-ports amo_policy \
+UNITREE_NET_IFACE=enp12s0 docker compose run --rm --service-ports amo_policy \
     python /workspace/amo/amo_inference.py --config /workspace/config/amo_g1.yaml --observe_only
 ```
 
@@ -135,15 +135,16 @@ this in the full navigation loop.
 
 ```bash
 cd Navigation/docker
-UNITREE_NET_IFACE=eth0 docker compose up unitree        # robot bridge + teleop
-UNITREE_NET_IFACE=eth0 docker compose up localization   # FAST-LIO localization
+UNITREE_NET_IFACE=enp12s0 docker compose up unitree        # robot bridge + teleop
+UNITREE_NET_IFACE=enp12s0 docker compose up localization   # DLIO localization
 ```
 
 Both use host networking + IPC so DDS discovery reaches the robot.
 
-The **FAST-LIO workspace is local and editable** at [ros2_ws/](ros2_ws/),
-bind-mounted to `/ws`. Open3D and the Livox SDKs are baked into the image, but
-the workspace itself is built **inside the container** the first time:
+The **DLIO workspace is local and editable** at [ros2_ws/](ros2_ws/),
+bind-mounted to `/ws`. The DLIO build deps (PCL, Eigen, OpenMP) and Livox-SDK2
+are baked into the image, but the workspace itself is built **inside the
+container** the first time:
 
 ```bash
 cd Navigation/docker

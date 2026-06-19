@@ -2,10 +2,9 @@
 *.rpm
 *.deb
 
-# Upstream FAST-LIO README media (gifs/images) — ~384 MB, not needed to build or
-# deploy. Delete these two lines if you want the full upstream docs in the repo.
-ros2_ws/src/FAST_LIO_LOCALIZATION_HUMANOID/doc/
-ros2_ws/src/FAST_LIO_LOCALIZATION_HUMANOID/FAST_LIO/doc/
+# Upstream DLIO README media (gifs/images) — not needed to build or deploy.
+# Delete this line if you want the full upstream docs in the repo.
+ros2_ws/src/direct_lidar_inertial_odometry/doc/
 
 # Python / pytest artifacts
 __pycache__/

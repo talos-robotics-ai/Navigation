@@ -9,7 +9,7 @@ install(
 )
 
 install(
-  PROGRAMS scripts/run_fastlio_debug.sh
+  PROGRAMS scripts/run_dlio_debug.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

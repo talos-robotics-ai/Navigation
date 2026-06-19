@@ -1,13 +1,13 @@
-"""Publish the G1 robot model + TF, attached to FAST-LIO's pose.
+"""Publish the G1 robot model + TF, attached to DLIO's pose.
 
     robot_state_publisher : g1_29dof.urdf -> /robot_description + link TFs
     joint_state_publisher : neutral (zero) joint angles so every link has a TF
-    static_transform       : FAST-LIO `body` (the MID-360 IMU frame) -> `pelvis`
+    static_transform       : DLIO `base_link` (the MID-360 sensor frame) -> `pelvis`
 
 The static transform is inverse(pelvis -> mid360_link) from the URDF chain
 (pelvis->waist_yaw->waist_roll->torso_link->mid360_link) at the neutral pose, so
-the model's mid360_link coincides with FAST-LIO's `body` frame and the whole G1
-rides the localization pose. RViz fixed frame stays `camera_init`.
+the model's mid360_link coincides with DLIO's `base_link` frame and the whole G1
+rides the localization pose. RViz fixed frame is `odom` (DLIO's world frame).
 
 Once Isaac publishes real /joint_states (via the DDS bridge), set
 use_joint_state_publisher:=false so the model shows the actual sim pose.
@@ -31,8 +31,8 @@ def generate_launch_description():
         'use_joint_state_publisher', default_value='true',
         description='Publish neutral joint angles (off once Isaac feeds /joint_states)')
     declare_attach = DeclareLaunchArgument(
-        'attach_frame', default_value='body',
-        description="FAST-LIO body frame the model's mid360_link is pinned to")
+        'attach_frame', default_value='base_link',
+        description="DLIO base_link frame the model's mid360_link is pinned to")
 
     urdf = PathJoinSubstitution(
         [FindPackageShare('g1_description'), 'urdf', 'g1_29dof.urdf'])
@@ -54,11 +54,11 @@ def generate_launch_description():
         parameters=[{'use_sim_time': use_sim_time}],
         condition=IfCondition(use_jsp),
     )
-    # body -> pelvis = inverse(pelvis -> mid360_link), computed from the URDF.
-    body_to_pelvis = Node(
+    # base_link -> pelvis = inverse(pelvis -> mid360_link), computed from the URDF.
+    base_link_to_pelvis = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='body_to_pelvis',
+        name='base_link_to_pelvis',
         arguments=[
             '--x', '0.022145', '--y', '-0.00003', '--z', '-0.459662',
             '--roll', '0', '--pitch', '-0.040143', '--yaw', '0',
@@ -73,5 +73,5 @@ def generate_launch_description():
         declare_attach,
         rsp,
         jsp,
-        body_to_pelvis,
+        base_link_to_pelvis,
     ])

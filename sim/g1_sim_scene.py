@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """Standalone Isaac Sim scene: Unitree G1 + Livox MID-360 LiDAR + IMU, published
-to ROS 2 exactly the way FAST_LIO_LOCALIZATION_HUMANOID expects.
+to ROS 2 for the DLIO (direct_lidar_inertial_odometry) localization stack.
 
-This script publishes (consumed by the g1_sim_bridge node, see below):
+This script publishes (consumed by the g1_sim_bridge QoS relay, see below):
 
     /livox/lidar     sensor_msgs/PointCloud2   frame_id = livox_frame  (RTX lidar)
     /livox/imu_raw   sensor_msgs/Imu           frame_id = livox_frame
     /clock           rosgraph_msgs/Clock
 
-FAST-LIO with lidar_type:1 wants a livox_ros_driver2/CustomMsg on
-/livox/custom_msg + a RELIABLE /livox/imu. Isaac's ROS 2 bridge only speaks
-PointCloud2 (BEST_EFFORT), and it runs on Isaac's Python 3.11 while
-livox_ros_driver2 is built for ROS 2 Humble (Python 3.10) -- so the
-PointCloud2 -> CustomMsg conversion and IMU QoS bridge are done by the companion
-ROS 2 node `g1_sim_bridge` in the Humble workspace, not here.
+DLIO consumes a plain PointCloud2 + Imu directly (no Livox CustomMsg needed),
+but its cloud subscriber is RELIABLE while Isaac's ROS 2 bridge only publishes
+BEST_EFFORT. The companion ROS 2 node `g1_sim_bridge` (Humble workspace) is a
+thin QoS relay: /livox/lidar -> /livox/lidar_reliable and /livox/imu_raw ->
+/livox/imu (both RELIABLE) so DLIO's subscribers match.
 
 Run via launch_g1_sim.sh (which sets RMW_IMPLEMENTATION=rmw_cyclonedds_cpp so it
 talks to the rest of the navigation stack), or directly:
@@ -47,12 +46,13 @@ parser.add_argument("--lidar-config", default="Livox_Mid360",
                     help="RTX lidar config name (file in lidar_configs/)")
 parser.add_argument("--lidar-topic", default="/livox/lidar")
 # IMU goes to an intermediate topic; g1_sim_bridge republishes it RELIABLE on
-# /livox/imu (Isaac's bridge publishes BEST_EFFORT, FAST-LIO needs RELIABLE).
+# /livox/imu (Isaac's bridge publishes BEST_EFFORT; the relay makes it RELIABLE
+# so any reliable consumer matches -- DLIO's IMU sub itself is BEST_EFFORT).
 parser.add_argument("--imu-topic", default="/livox/imu_raw")
 parser.add_argument("--frame-id", default="livox_frame")
 parser.add_argument("--clock-topic", default="/clock")
 # The G1 is unactuated in this scene -- with physics on and no controller it
-# sags/collapses under gravity and FAST-LIO tracks the falling sensor (Z drifts).
+# sags/collapses under gravity and DLIO tracks the falling sensor (Z drifts).
 # --hold-pose pins the pelvis to the world (fixed base) so the robot stays put
 # for a clean static localization test. Turn OFF once AMO drives the joints.
 parser.add_argument("--hold-pose", action="store_true",
@@ -261,7 +261,7 @@ simulation_app.update()
 sim_ctx.play()
 carb.log_warn("[g1_sim] playing. Publishing /livox/lidar, /livox/imu_raw, /clock. "
               "Run 'ros2 launch g1_sim_bridge sim_localization.launch.py' to get "
-              "/livox/custom_msg + /livox/imu for FAST-LIO. Drive the G1 joints "
+              "/livox/lidar_reliable + /livox/imu for DLIO. Drive the G1 joints "
               "with your locomotion policy/companion to walk.")
 
 while simulation_app.is_running():

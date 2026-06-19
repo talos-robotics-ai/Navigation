@@ -487,22 +487,20 @@ void Lddc::InitImuMsg(const ImuData& imu_data, ImuMsg& imu_msg, uint64_t& timest
   imu_msg.header.stamp = rclcpp::Time(timestamp);  // to ros time stamp
 #endif
 
-  // ── G1 upside-down MID-360 mount: rotate IMU by roll 180° (R_x(180)) ──
-  // The MID-360 is mounted inverted on the G1. MID360_config.json applies
-  // roll:180 to the POINT CLOUD, but the stock driver published the IMU RAW,
-  // leaving cloud upright + IMU inverted → FAST-LIO odometry was fine standing
-  // but diverged on any motion. deepglint's modified driver rotates the IMU
-  // too; replicate that here so /livox/imu is in the same upright frame as the
-  // cloud, and keep FAST-LIO's extrinsic_R = identity. R_x(180) = diag(1,-1,-1):
-  // x unchanged, y and z negated, for both gyro and accel.
-  // NOTE: this is hardcoded for the G1's roll:180 mount. If the mount changes,
-  // update this to match MID360_config.json's extrinsic_parameter.
-  imu_msg.angular_velocity.x =  imu_data.gyro_x;
-  imu_msg.angular_velocity.y = -imu_data.gyro_y;
-  imu_msg.angular_velocity.z = -imu_data.gyro_z;
-  imu_msg.linear_acceleration.x =  imu_data.acc_x;
-  imu_msg.linear_acceleration.y = -imu_data.acc_y;
-  imu_msg.linear_acceleration.z = -imu_data.acc_z;
+  // Publish the MID-360 IMU RAW (stock driver behavior). The MID-360 is mounted
+  // upside-down on the G1, so this raw IMU is inverted (acc.z ≈ -9.8 at rest)
+  // relative to the cloud (which MID360_config.json roll:180 already rights).
+  // DLIO corrects the inversion in config via extrinsics/baselink2imu/R = R_x(180)
+  // (see g1_sim_bridge/config/dlio_mid360_real.yaml) — unlike FAST-LIO, DLIO's
+  // baselink2imu rotation genuinely re-orients the IMU, so NO driver patch is
+  // needed. (A previous build rotated the IMU here for FAST-LIO; that was
+  // reverted to avoid double-rotating now that DLIO owns the transform.)
+  imu_msg.angular_velocity.x = imu_data.gyro_x;
+  imu_msg.angular_velocity.y = imu_data.gyro_y;
+  imu_msg.angular_velocity.z = imu_data.gyro_z;
+  imu_msg.linear_acceleration.x = imu_data.acc_x;
+  imu_msg.linear_acceleration.y = imu_data.acc_y;
+  imu_msg.linear_acceleration.z = imu_data.acc_z;
 }
 
 void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index) {

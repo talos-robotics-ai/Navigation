@@ -1,19 +1,23 @@
-"""Simulation localization bring-up.
+"""Simulation localization bring-up (DLIO).
 
-Starts the Isaac->FAST-LIO bridge and (optionally) FAST-LIO itself, configured
-for simulation:
+Starts the Isaac->DLIO QoS relay and (optionally) DLIO itself, configured for
+simulation:
 
-    Isaac Sim  --(/livox/lidar PointCloud2)-->  g1_sim_bridge  --(/livox/custom_msg)-->  FAST-LIO
-    Isaac Sim  --(/livox/imu_raw  BEST_EFFORT)->  g1_sim_bridge  --(/livox/imu RELIABLE)->  FAST-LIO
+    Isaac Sim --(/livox/lidar    PointCloud2 BEST_EFFORT)--> relay --(/livox/lidar_reliable RELIABLE)--> DLIO
+    Isaac Sim --(/livox/imu_raw  Imu        BEST_EFFORT)--> relay --(/livox/imu             RELIABLE)--> DLIO
 
-FAST-LIO runs with use_sim_time:=true so it consumes Isaac's /clock. The
-mid360.yaml config is used unchanged (lidar_type:1, /livox/custom_msg,
-/livox/imu) -- the bridge makes Isaac look exactly like the real Livox driver.
+DLIO consumes the PointCloud2 + Imu directly -- no Livox CustomMsg conversion is
+needed (that was a FAST-LIO requirement). The DLIO nodes themselves are brought
+up by the shared dlio.launch.py (config_file=dlio_sim.yaml, use_sim_time:=true);
+this file just adds the sim-only QoS relay in front of it.
+
+DLIO publishes /dlio/odom_node/{odom,pose,path,pointcloud/deskewed} and
+/dlio/map_node/map, and broadcasts TF odom -> base_link -> {livox, livox_imu}.
 
 Run Isaac first (Navigation/sim/launch_g1_sim.sh), then:
 
     ros2 launch g1_sim_bridge sim_localization.launch.py
-    ros2 launch g1_sim_bridge sim_localization.launch.py start_fastlio:=false   # bridge only
+    ros2 launch g1_sim_bridge sim_localization.launch.py start_dlio:=false   # relay only
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -25,65 +29,52 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    start_fastlio = LaunchConfiguration('start_fastlio')
+    start_dlio = LaunchConfiguration('start_dlio')
     use_sim_time = LaunchConfiguration('use_sim_time')
-    fake_sweep_time = LaunchConfiguration('fake_sweep_time')
-    num_lines = LaunchConfiguration('num_lines')
     stride = LaunchConfiguration('stride')
 
-    declare_start_fastlio = DeclareLaunchArgument(
-        'start_fastlio', default_value='true',
-        description='Also launch FAST-LIO (mapping.launch.py) with sim params')
+    declare_start_dlio = DeclareLaunchArgument(
+        'start_dlio', default_value='true',
+        description='Also launch DLIO (dlio_odom_node + dlio_map_node) with sim params')
     declare_use_sim_time = DeclareLaunchArgument(
         'use_sim_time', default_value='true',
-        description='FAST-LIO consumes Isaac /clock when true')
-    declare_fake_sweep = DeclareLaunchArgument(
-        'fake_sweep_time', default_value='false',
-        description='Synthesize per-point offset_time (de-skew). Off: Isaac '
-                    'clouds are instantaneous snapshots.')
-    declare_num_lines = DeclareLaunchArgument(
-        'num_lines', default_value='4',
-        description='Synthetic Livox scan lines (<= FAST-LIO scan_line)')
+        description='DLIO consumes Isaac /clock when true')
     declare_stride = DeclareLaunchArgument(
         'stride', default_value='1',
-        description='Keep every Nth point (decimation)')
+        description='Relay decimation: keep every Nth cloud point (1 = all)')
 
-    bridge_node = Node(
+    relay_node = Node(
         package='g1_sim_bridge',
-        executable='isaac_livox_custom_adapter_node',
-        name='isaac_livox_custom_adapter',
+        executable='isaac_dlio_qos_relay_node',
+        name='isaac_dlio_qos_relay',
         output='screen',
         parameters=[{
             'input_topic': '/livox/lidar',
-            'output_topic': '/livox/custom_msg',
+            'output_topic': '/livox/lidar_reliable',
             'imu_in_topic': '/livox/imu_raw',
             'imu_out_topic': '/livox/imu',
-            'fake_sweep_time': fake_sweep_time,
-            'num_lines': num_lines,
             'stride': stride,
             'use_sim_time': use_sim_time,
         }],
     )
 
-    fast_lio_launch = IncludeLaunchDescription(
+    # Shared DLIO node bring-up, sim variant: read the relay outputs, sim config.
+    dlio = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
-            PathJoinSubstitution([
-                FindPackageShare('fast_lio'), 'launch', 'mapping.launch.py'])
-        ]),
+            FindPackageShare('g1_sim_bridge'), '/launch/dlio.launch.py']),
         launch_arguments={
             'use_sim_time': use_sim_time,
-            'config_file': 'mid360.yaml',
-            'rviz': 'true',
+            'config_file': 'dlio_sim.yaml',
+            'pointcloud_topic': '/livox/lidar_reliable',
+            'imu_topic': '/livox/imu',
         }.items(),
-        condition=IfCondition(start_fastlio),
+        condition=IfCondition(start_dlio),
     )
 
     return LaunchDescription([
-        declare_start_fastlio,
+        declare_start_dlio,
         declare_use_sim_time,
-        declare_fake_sweep,
-        declare_num_lines,
         declare_stride,
-        bridge_node,
-        fast_lio_launch,
+        relay_node,
+        dlio,
     ])

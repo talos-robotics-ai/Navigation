@@ -81,7 +81,7 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ./shared:/workspace/shared
       - ./config:/workspace/config
-      # Locally-editable FAST-LIO workspace. Build once inside the container
+      # Locally-editable DLIO workspace. Build once inside the container
       # with `build_ws` (rosdep + colcon); install/ + build/ persist on the host.
       - ../ros2_ws:/ws
       # Sim helpers (verify_topics.sh etc.) for checking Isaac's topics from

@@ -117,6 +117,60 @@ def test_smoother_gain_ramp_soft_to_full():
     assert skd == pytest.approx(1.0, abs=1e-6)
 
 
+def test_smoother_releases_to_passthrough_after_reaching():
+    # While reaching the reference the clamp limits per-tick motion; once released
+    # the raw policy target passes straight through (full reactivity for recovery).
+    measured = np.zeros(2, dtype=np.float32)
+    s = JointSmoother(
+        DT, blend_s=0.0, clamp_delta=0.05, filter_kind="none",
+        release_s=1.0, release_ramp_s=0.5,
+    )
+    s.reset(measured)
+    # before release: a far target is rate-clamped
+    early = s.step(np.full(2, 10.0, dtype=np.float32))
+    assert np.all(np.abs(early - measured) <= 0.05 + 1e-6)
+    # run past release_s + release_ramp_s
+    for _ in range(int((1.0 + 0.5) / DT) + 5):
+        cmd = s.step(np.full(2, 10.0, dtype=np.float32))
+    assert s.release_factor == pytest.approx(1.0)
+    assert not s.filtering
+    # a fresh large step now lands on target in a single tick (no clamp)
+    cmd = s.step(np.array([3.0, -2.0], dtype=np.float32))
+    assert np.allclose(cmd, [3.0, -2.0], atol=1e-5)
+
+
+def test_smoother_release_disabled_keeps_clamp_forever():
+    measured = np.zeros(3, dtype=np.float32)
+    target = np.full(3, 10.0, dtype=np.float32)
+    s = JointSmoother(DT, blend_s=0.0, clamp_delta=0.05, filter_kind="none", release_s=0.0)
+    s.reset(measured)
+    prev = measured.copy()
+    for _ in range(500):  # 10 s — far past any startup window
+        cmd = s.step(target)
+        assert np.all(np.abs(cmd - prev) <= 0.05 + 1e-6)
+        prev = cmd
+    assert s.filtering
+
+
+def test_smoother_release_transition_is_continuous():
+    # No command jump as filtering fades out around the release point.
+    measured = np.zeros(4, dtype=np.float32)
+    target = np.full(4, 0.6, dtype=np.float32)
+    s = JointSmoother(
+        DT, blend_s=2.0, clamp_delta=0.05, filter_kind="critdamp", filter_wn=15.0,
+        release_s=2.0, release_ramp_s=1.0,
+    )
+    s.reset(measured)
+    prev = s.step(target)
+    max_jump = 0.0
+    for _ in range(300):  # 6 s, spanning the release ramp
+        cmd = s.step(target)
+        max_jump = max(max_jump, float(np.max(np.abs(cmd - prev))))
+        prev = cmd
+    # joints have settled on the reference by release, so the hand-off is tiny
+    assert max_jump <= 0.05 + 1e-3
+
+
 def test_smoother_commanded_velocity_bounded():
     measured = np.zeros(2, dtype=np.float32)
     target = np.array([1.0, -1.0], dtype=np.float32)

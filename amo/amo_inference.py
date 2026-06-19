@@ -54,7 +54,10 @@ DEFAULT_CONFIG = {
         "kd_scale_start": 0.50, "stabilize_s": 10.0,
         "startup_command_ramp_s": 3.0, "safety_tilt_rad": 0.6, "state_timeout_s": 0.5,
     },
-    "filter": {"kind": "critdamp", "tau": 0.08, "wn": 12.0, "clamp_delta_rad": 0.05},
+    "filter": {
+        "kind": "critdamp", "tau": 0.08, "wn": 12.0, "clamp_delta_rad": 0.05,
+        "release_s": None, "release_ramp_s": 1.0,
+    },
     "command": {
         "source": "zero", "constant": [0.0, 0.0, 0.0],
         "max_forward_vel": 0.8, "max_yaw_rate": 0.4, "websocket_port": 8766,
@@ -202,6 +205,13 @@ def run(cfg: dict) -> int:
     dep.wait_until_ready()
     dt = dep.control_dt  # honour the policy's native control frequency
 
+    # Filtering (clamp + running filter) holds only while the joints reach the
+    # policy reference, then releases for full reactivity. Default the release
+    # point to the end of the pose blend when not set explicitly.
+    release_s = filt.get("release_s")
+    if release_s is None:
+        release_s = act["blend_s"]
+
     smoother = JointSmoother(
         dt,
         blend_s=act["blend_s"],
@@ -212,6 +222,8 @@ def run(cfg: dict) -> int:
         filter_kind=filt["kind"],
         filter_tau=filt["tau"],
         filter_wn=filt["wn"],
+        release_s=float(release_s),
+        release_ramp_s=float(filt.get("release_ramp_s", 0.0)),
     )
 
     command_source = build_command_source(cmd_cfg, cfg.get("_cli_const"))
@@ -230,9 +242,9 @@ def run(cfg: dict) -> int:
 
     logger.info(
         "starting AMO control loop @ %.1f Hz | filter=%s | blend=%.1fs gain_ramp=%.1fs "
-        "stabilize=%.1fs | observe_only=%s",
+        "stabilize=%.1fs | release=%.1fs(+%.1fs ramp) | observe_only=%s",
         1.0 / dt, filt["kind"], act["blend_s"], act["gain_ramp_s"],
-        act["stabilize_s"], observe_only,
+        act["stabilize_s"], smoother.release_s, smoother.release_ramp_s, observe_only,
     )
 
     stop = {"flag": False}
@@ -280,11 +292,12 @@ def run(cfg: dict) -> int:
 
             if tick % int(round(1.0 / dt)) == 0:  # ~1 Hz status
                 logger.info(
-                    "t=%5.1fs phase=%-9s gains=(%.2f,%.2f) cmd=(%.2f,%.2f,%.2f) "
+                    "t=%5.1fs phase=%-9s filt=%.2f gains=(%.2f,%.2f) cmd=(%.2f,%.2f,%.2f) "
                     "max|Δq|=%.3f tilt=%.2f",
                     elapsed,
                     "blend" if smoother.blending else
                     ("stabilize" if elapsed < command_hold_s else "walk"),
+                    1.0 - smoother.release_factor,
                     s_kp, s_kd, command3[0], command3[1], command3[2],
                     float(np.max(np.abs(cmd_q - dep.dof_pos))), tilt,
                 )

@@ -4,7 +4,7 @@ The Navigation stack is split into **three independent container images**, one
 per concern. They are deliberately decoupled: each can be built, run, and
 debugged on its own, and they communicate at run time over **CycloneDDS** (the
 robot bus) and ROS 2 topics — never by sharing a Python environment. This keeps
-the heavy, conflicting dependency sets (ROS 2 + Open3D vs. RoboJuDo + torch vs.
+the heavy, conflicting dependency sets (ROS 2 + DLIO/PCL vs. RoboJuDo + torch vs.
 Unitree SDK) out of each other's way.
 
 ```mermaid
@@ -20,7 +20,7 @@ flowchart TB
     end
 
     subgraph loc["localization — Dockerfile.localization (ROS 2)"]
-        l["FAST-LIO localization<br/>Open3D · Livox SDK 1/2 · PCL · RViz"]
+        l["DLIO localization<br/>PCL · Eigen · OpenMP · Livox-SDK2 · RViz"]
     end
 
     robot <-->|DDS| unitree
@@ -35,7 +35,7 @@ flowchart TB
 | Image | Dockerfile | Base | Purpose | ROS 2? |
 |---|---|---|---|---|
 | **unitree** | `Dockerfile.unitree` | `ros:humble-desktop` | Unitree SDK2 (C++) + `unitree_ros2` message packages, CycloneDDS, teleop, joystick, RViz. The ROS 2 ↔ robot bridge layer. | ✅ |
-| **localization** | `Dockerfile.localization` | `ros:humble-desktop` | FAST-LIO LiDAR-inertial localization for the MID-360: Open3D 0.14.1 (from source), Livox-SDK + Livox-SDK2, PCL, plus the `FAST_LIO_LOCALIZATION_HUMANOID` workspace. | ✅ |
+| **localization** | `Dockerfile.localization` | `ros:humble-desktop` | DLIO LiDAR-inertial odometry/localization for the MID-360: PCL, Eigen, OpenMP, `pcl_ros`, plus Livox-SDK2 (for the real-robot `livox_ros_driver2`) and the `direct_lidar_inertial_odometry` workspace. | ✅ |
 | **amo_policy** | `Dockerfile.amo_policy` | `python:3.11-slim-bookworm` | The RoboJuDo **AMO RL gait** that actually drives the joints, via `real_g1_walking_policy.py`. Pure Python over CycloneDDS — **no ROS 2**. | ❌ |
 
 ## Shared conventions
@@ -72,27 +72,30 @@ Entrypoint (`unitree_entrypoint.sh`) synthesises `CYCLONEDDS_URI` from
 > **Python** binding `unitree_sdk2py` needed by the AMO policy is *not* here —
 > it lives in the `amo_policy` image, which talks to the robot directly.
 
-## 2. `Dockerfile.localization` — FAST-LIO mapping/localization
+## 2. `Dockerfile.localization` — DLIO odometry/localization
 
-`ros:humble-desktop` base. The heavyweight build:
+`ros:humble-desktop` base. DLIO's build dependencies are lightweight system
+packages — no from-source Open3D, no Livox-SDK1:
 
-- **Open3D 0.14.1** compiled from source to `/opt/open3d-0.14.1` (GUI/CUDA/
-  Python module off; uses system Eigen/GLEW/GLFW/qhull). Exposes `Open3D_DIR`,
-  `CMAKE_PREFIX_PATH`, `LD_LIBRARY_PATH`. **Baked into the image.**
-- **Livox-SDK** and **Livox-SDK2** from source (MID-360 driver dependencies).
-  **Baked into the image** (installed libs in `/usr/local`; `LIVOX_SDK2_ROOT`
-  points the driver build at them). These are build-once C libraries, not edited.
-- PCL, OpenCV, glog/gflags, and the ROS 2 perception stack (`pcl_ros`,
-  `cv_bridge`, `image_transport`, message packages, `rviz2`).
+- **PCL, Eigen, and OpenMP** via `libpcl-dev`, `libeigen3-dev`, `libomp-dev`,
+  plus `ros-humble-pcl-ros`. These are DLIO's only real build deps and live in
+  the base layer.
+- **Livox-SDK2** from source — still needed for the real-robot
+  `livox_ros_driver2`. **Baked into the image** (installed libs in `/usr/local`;
+  `LIVOX_SDK2_ROOT` points the driver build at them). Build-once C library, not
+  edited. (Open3D 0.14.1 and Livox-SDK1 were removed — they only served the old
+  FAST-LIO / `open3d_loc` path, which DLIO does not use.)
+- The ROS 2 perception stack (`pcl_ros`, `cv_bridge`, `image_transport`,
+  message packages, `rviz2`).
 
 The ROS 2 workspace is **not** baked in — it is a locally-editable checkout at
 [`../ros2_ws/`](../ros2_ws/), bind-mounted to `/ws` by the compose file, and
 built **inside the container** with the bundled `build_ws` helper. It holds both
-the `FAST_LIO_LOCALIZATION_HUMANOID` localization packages and the
-`livox_ros_driver2` MID-360 ROS 2 driver (with the tuned `MID360_config.json`);
-the driver links against the baked-in Livox-SDK2. `build_ws` runs rosdep +
-colcon, pointing CMake at the image's Open3D and selecting the driver's ROS 2
-build (`-DROS_EDITION=ROS2`):
+the `direct_lidar_inertial_odometry` packages (DLIO, with `dlio_odom_node` +
+`dlio_map_node`) and the `livox_ros_driver2` MID-360 ROS 2 driver (with the
+tuned `MID360_config.json`); the driver links against the baked-in Livox-SDK2.
+`build_ws` runs rosdep + colcon and selects the driver's ROS 2 build
+(`-DROS_EDITION=ROS2`); it no longer passes `-DOpen3D_DIR`:
 
 ```bash
 cd Navigation/docker
@@ -103,8 +106,6 @@ build_ws            # rosdep install + colcon build --symlink-install
 
 `build/`, `install/`, and `log/` are written back to the host under `ros2_ws/`
 (git-ignored). New shells auto-source `/ws/install/setup.bash` once it exists.
-The Open3D path hard-coded in `open3d_loc/CMakeLists.txt` is patched in the local
-checkout to `/opt/open3d-0.14.1/...`.
 
 This is the perception/state-estimation image; it publishes the odometry the
 planner and AMO policy consume.
@@ -165,7 +166,7 @@ docker run --rm -it --network host --ipc host \
 ## Why three images, not one
 
 RoboJuDo wants Python 3.11 and a specific torch/mujoco/cyclonedds stack;
-FAST-LIO wants a from-source Open3D and PCL against ROS 2 Humble (Python 3.10);
+DLIO wants PCL/Eigen/OpenMP against ROS 2 Humble (Python 3.10);
 the Unitree bridge wants the C++ SDK and `unitree_ros2`. Forcing these into one
 image creates version conflicts (notably the Python 3.10 vs 3.11 split) and a
 giant, slow-to-build image. Splitting by concern keeps each build reproducible

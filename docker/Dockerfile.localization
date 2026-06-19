@@ -62,92 +62,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN rosdep init || true && rosdep update
 
 # ----------------------------------------------------------------------
-# Build Open3D 0.14.1 from source
-#
-# Installs to:
-#   /opt/open3d-0.14.1
-#
-# CMake package path:
-#   /opt/open3d-0.14.1/lib/cmake/Open3D
+# DLIO (direct_lidar_inertial_odometry) needs no Open3D and no Livox-SDK1.
+# Open3D 0.14.1 + Livox-SDK1 were only required by the old FAST-LIO /
+# open3d_loc localization stack, which DLIO replaces. DLIO's build deps
+# (PCL, Eigen, OpenMP -> libpcl-dev / libeigen3-dev / libomp-dev, plus
+# ros-humble-pcl-ros) are already installed in the base layer above.
+# Only Livox-SDK2 is still built below, for the real-robot livox_ros_driver2.
 # ----------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ninja-build \
-    clang \
-    libssl-dev \
-    libusb-1.0-0-dev \
-    libudev-dev \
-    libgl1-mesa-dev \
-    libglu1-mesa-dev \
-    libglew-dev \
-    libglfw3-dev \
-    libjsoncpp-dev \
-    libpng-dev \
-    libjpeg-dev \
-    libtiff-dev \
-    libtinyxml2-dev \
-    libqhull-dev \
-    libassimp-dev \
-    libfreetype6-dev \
-    libsdl2-dev \
-    libzmq3-dev \
-    libmsgpack-dev \
-    ccache \
-    && rm -rf /var/lib/apt/lists/*
-
-# NOTE: -DGLIBCXX_USE_CXX11_ABI=ON below is REQUIRED. Open3D 0.14.1 defaults to
-# the OLD C++ string ABI (=0) and forces it onto every consumer via its CMake
-# config; ROS 2 Humble's rclcpp is built with the NEW ABI (=1). Without this
-# flag, open3d_loc compiles old-ABI and fails to link rclcpp (undefined
-# 'Ss'-mangled std::string symbols at link time).
-RUN git clone --recursive --branch v0.14.1 --depth 1 \
-      https://github.com/isl-org/Open3D.git /tmp/Open3D && \
-    cd /tmp/Open3D && \
-    mkdir -p build && cd build && \
-    cmake .. \
-      -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=/opt/open3d-0.14.1 \
-      -DBUILD_SHARED_LIBS=ON \
-      -DGLIBCXX_USE_CXX11_ABI=ON \
-      -DBUILD_PYTHON_MODULE=OFF \
-      -DBUILD_EXAMPLES=OFF \
-      -DBUILD_UNIT_TESTS=OFF \
-      -DBUILD_BENCHMARKS=OFF \
-      -DBUILD_CUDA_MODULE=OFF \
-      -DBUILD_GUI=OFF \
-      -DBUILD_WEBRTC=OFF \
-      -DUSE_SYSTEM_EIGEN3=ON \
-      -DUSE_SYSTEM_GLEW=ON \
-      -DUSE_SYSTEM_GLFW=ON \
-      -DUSE_SYSTEM_LIBPNG=ON \
-      -DUSE_SYSTEM_LIBJPEG=ON \
-      -DUSE_SYSTEM_TINYXML2=ON \
-      -DUSE_SYSTEM_QHULL=ON && \
-    ninja -j"$(nproc)" && \
-    ninja install && \
-    ldconfig && \
-    rm -rf /tmp/Open3D
-
-ENV Open3D_DIR=/opt/open3d-0.14.1/lib/cmake/Open3D
-ENV CMAKE_PREFIX_PATH=/opt/open3d-0.14.1:${CMAKE_PREFIX_PATH}
-ENV LD_LIBRARY_PATH=/opt/open3d-0.14.1/lib:${LD_LIBRARY_PATH}
-
-# ----------------------------------------------------------------------
-# Install Livox-SDK (SDK1)
-# Not used by the MID-360 path (livox_ros_driver2 links Livox-SDK2 below), but
-# kept for older Livox ROS driver / FAST-LIO setups. Livox-SDK predates GCC 11:
-# several headers use std::shared_ptr without #include <memory> (newer libstdc++
-# no longer pulls it in transitively) and the SDK builds with -Werror, so the
-# stock build fails on Ubuntu 22.04. Force-include <memory> to fix it.
-# ----------------------------------------------------------------------
-RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK.git /tmp/Livox-SDK && \
-    cd /tmp/Livox-SDK && \
-    mkdir -p build && cd build && \
-    cmake .. -DCMAKE_CXX_FLAGS="-include memory" && \
-    make -j"$(nproc)" && \
-    make install && \
-    ldconfig && \
-    rm -rf /tmp/Livox-SDK
 
 # ----------------------------------------------------------------------
 # Install Livox-SDK2
@@ -181,22 +102,22 @@ ENV LIVOX_SDK2_ROOT=/usr/local
 #   # then, inside:
 #   build_ws          # convenience alias (rosdep + colcon, see below)
 #
-# Open3D and the Livox SDKs above are baked into the image (just installed
-# libs), so only the FAST-LIO colcon build happens at run time.
+# Livox-SDK2 above is baked into the image (just installed libs), so only the
+# DLIO + livox_ros_driver2 colcon build happens at run time.
 # ----------------------------------------------------------------------
 
 # Convenience build helper baked into the image. Runs rosdep + colcon against
-# the mounted /ws, pointing CMake at the image's Open3D install.
+# the mounted /ws.
 RUN cat > /usr/local/bin/build_ws <<'EOF' && chmod +x /usr/local/bin/build_ws
 #!/bin/bash
 set -e
 source /opt/ros/humble/setup.bash
 cd /ws
 rosdep install --from-paths src --ignore-src -r -y --rosdistro humble || true
-# -DOpen3D_DIR: open3d_loc | -DROS_EDITION=ROS2: livox_ros_driver2 (ROS2 branch).
-# Both cmake vars are ignored by packages that don't use them.
+# -DROS_EDITION=ROS2: livox_ros_driver2 (ROS2 branch). Ignored by packages
+# (direct_lidar_inertial_odometry, g1_*) that don't use it.
 colcon build --symlink-install \
-    --cmake-args -DOpen3D_DIR=/opt/open3d-0.14.1/lib/cmake/Open3D -DROS_EDITION=ROS2
+    --cmake-args -DROS_EDITION=ROS2
 echo "[build_ws] done — 'source /ws/install/setup.bash' (new shells do this automatically)"
 EOF
 
@@ -210,9 +131,6 @@ ENV ROS_DOMAIN_ID=0
 # shell before the first build_ws doesn't error).
 RUN echo 'source /opt/ros/humble/setup.bash' >> /root/.bashrc && \
     echo '[ -f /ws/install/setup.bash ] && source /ws/install/setup.bash' >> /root/.bashrc && \
-    echo 'export Open3D_DIR=/opt/open3d-0.14.1/lib/cmake/Open3D' >> /root/.bashrc && \
-    echo 'export CMAKE_PREFIX_PATH=/opt/open3d-0.14.1:${CMAKE_PREFIX_PATH}' >> /root/.bashrc && \
-    echo 'export LD_LIBRARY_PATH=/opt/open3d-0.14.1/lib:${LD_LIBRARY_PATH}' >> /root/.bashrc && \
     echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> /root/.bashrc && \
     echo 'export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}' >> /root/.bashrc
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from activation_utils import blend_pose, clamp_step_delta, gain_ramp_scale
+from activation_utils import blend_pose, clamp_step_delta, gain_ramp_scale, smoothstep
 
 
 class EWMAFilter:
@@ -111,9 +111,18 @@ class JointSmoother:
 
     Layers:
       A  startup pose blend: measured_q ─smoothstep→ raw target over ``blend_s``.
-      D  running filter (``filter_kind``): always-on, damps abrupt policy output.
-      C  per-tick clamp: |cmd - prev| ≤ ``clamp_delta`` per joint (hard safety).
+      D  running filter (``filter_kind``): damps abrupt policy output while the
+         joints reach the reference, then fades out (see ``release_s``).
+      C  per-tick clamp: |cmd - prev| ≤ ``clamp_delta`` per joint (anti-snap rail),
+         likewise faded out after the reaching phase.
       B  gain ramp scales (``gain_scales``): soft → full over ``gain_ramp_s``.
+
+    Filtering layers C and D exist only to ease the joints from the captured
+    posture onto the policy reference without snapping. Once that hand-off is
+    done they would otherwise rate-limit the running policy and blunt push
+    recovery, so they *release* over ``release_ramp_s`` starting at ``release_s``,
+    after which the raw policy target passes straight through. ``release_s <= 0``
+    keeps them engaged forever (the original always-on behavior).
     """
 
     def __init__(
@@ -128,6 +137,8 @@ class JointSmoother:
         filter_kind: str = "critdamp",
         filter_tau: float = 0.08,
         filter_wn: float = 12.0,
+        release_s: float = 0.0,
+        release_ramp_s: float = 0.0,
     ):
         self.dt = float(dt)
         self.blend_s = float(blend_s)
@@ -135,6 +146,8 @@ class JointSmoother:
         self.kp_scale_start = float(kp_scale_start)
         self.kd_scale_start = float(kd_scale_start)
         self.clamp_delta = float(clamp_delta)
+        self.release_s = float(release_s)
+        self.release_ramp_s = float(release_ramp_s)
         self._filter = make_filter(filter_kind, self.dt, tau=filter_tau, wn=filter_wn)
 
         self._measured_q: np.ndarray | None = None
@@ -157,6 +170,25 @@ class JointSmoother:
     def blending(self) -> bool:
         return self.blend_s > 0.0 and self._t < self.blend_s
 
+    @property
+    def release_factor(self) -> float:
+        """0 = filtering fully engaged, 1 = fully released (raw policy pass-through).
+
+        Smoothsteps 0→1 over ``release_ramp_s`` starting at ``release_s`` so the
+        clamp/filter influence fades out without a discontinuity. ``release_s <= 0``
+        disables release entirely (filtering stays on forever).
+        """
+        if self.release_s <= 0.0 or self._t < self.release_s:
+            return 0.0
+        if self.release_ramp_s <= 0.0:
+            return 1.0
+        return smoothstep((self._t - self.release_s) / self.release_ramp_s)
+
+    @property
+    def filtering(self) -> bool:
+        """Whether layers C/D still influence the command (False once released)."""
+        return self.release_factor < 1.0
+
     def gain_scales(self) -> tuple[float, float]:
         """Layer B: (kp_scale, kd_scale), smoothstep soft→full over gain_ramp_s."""
         s_kp = gain_ramp_scale(self._t, self.gain_ramp_s, self.kp_scale_start)
@@ -177,12 +209,22 @@ class JointSmoother:
         else:
             target = raw
 
-        # Layer D — always-on running filter.
-        if self._filter is not None:
-            target = self._filter.step(target)
+        # How far the filtering layers have released toward raw pass-through.
+        r = self.release_factor
 
-        # Layer C — per-tick rate clamp (final hard safety rail).
-        cmd = clamp_step_delta(self._prev_cmd, target, self.clamp_delta)
+        # Layer D — running filter, blended out toward the raw target as it releases.
+        if self._filter is not None and r < 1.0:
+            filtered = self._filter.step(target)
+            target = filtered if r <= 0.0 else \
+                ((1.0 - r) * filtered + r * target).astype(np.float32)
+
+        # Layer C — per-tick rate clamp, likewise relaxed toward pass-through.
+        if r >= 1.0:
+            cmd = target
+        else:
+            clamped = clamp_step_delta(self._prev_cmd, target, self.clamp_delta)
+            cmd = clamped if r <= 0.0 else \
+                ((1.0 - r) * clamped + r * target).astype(np.float32)
 
         self._prev_cmd = cmd
         self._t += step_dt

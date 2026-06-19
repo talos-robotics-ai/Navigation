@@ -4,10 +4,11 @@
   <name>g1_bringup</name>
   <version>0.1.0</version>
   <description>
-    Bring-up / debugging launches for the G1 navigation stack: a FAST-LIO online
+    Bring-up / debugging launches for the G1 navigation stack: a DLIO online
     debugging session with RViz (sim), plus orchestration of Isaac Sim + the AMO
-    policy. RViz configs use the FAST-LIO output topics
-    (/Odometry_loc, /cloud_registered_1, /Laser_map_1, /path_1; frame camera_init).
+    policy. RViz configs use the DLIO output topics
+    (/dlio/odom_node/odom, /dlio/odom_node/pointcloud/deskewed,
+    /dlio/map_node/map, /dlio/odom_node/path; frame odom).
   </description>
   <maintainer email="lorenzo.ortolani@talosrobotics.ai">Lorenzo Ortolani</maintainer>
   <license>Apache-2.0</license>
@@ -15,7 +16,9 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>g1_sim_bridge</exec_depend>
-  <exec_depend>fast_lio</exec_depend>
+  <exec_depend>g1_local_map</exec_depend>
+  <exec_depend>direct_lidar_inertial_odometry</exec_depend>
+  <exec_depend>livox_ros_driver2</exec_depend>
   <exec_depend>g1_description</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>joint_state_publisher</exec_depend>

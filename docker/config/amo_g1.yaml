@@ -25,11 +25,17 @@ activation:                # staged snap-free startup (filter layers A + B)
   safety_tilt_rad: 0.6     # abort + damp if body tilt exceeds this
   state_timeout_s: 0.5     # abort if no fresh LowState within this window
 
-filter:                    # layer D: optional running joint filter (off when kind=none)
-  kind: none           # none | ewma | critdamp
+filter:                    # layers C + D: smoothing that eases joints onto the reference
+  kind: none           # layer D running filter: none | ewma | critdamp
   tau: 0.08                # ewma time constant (s) — used when kind=ewma
   wn: 12.0                 # critdamp natural frequency (rad/s) — used when kind=critdamp
   clamp_delta_rad: 0.05    # layer C: max per-joint change per control tick
+  # Filtering (layers C + D) is only needed to reach the policy reference without
+  # snapping; afterwards it rate-limits the policy and blunts push recovery, so it
+  # releases to raw pass-through. release_s null = auto (= blend_s, end of reaching);
+  # 0 = never release (always-on, the old behavior).
+  release_s: null          # seconds before filtering starts fading out (null = blend_s)
+  release_ramp_s: 1.0      # fade-out window so the hand-off has no discontinuity
 
 command:                   # velocity command source (vx, vy, yaw)
   source: zero             # zero (stand) | constant | websocket

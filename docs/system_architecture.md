@@ -3,7 +3,7 @@
 End-to-end overview of the Unitree G1 autonomous-navigation stack as packaged by
 this `Navigation/` deployment layer:
 
-**LiDAR + IMU → FAST-LIO localization → A\* global/local planning → MPC
+**LiDAR + IMU → DLIO localization → A\* global/local planning → MPC
 trajectory tracking → AMO RL walking gait → robot.**
 
 The closed loop runs continuously: *pose + obstacles + goal → A\* path → MPC
@@ -25,7 +25,7 @@ flowchart TB
 
     subgraph PERC["Perception / localization"]
         prep["livox_preprocess<br/>(point-cloud cleanup)"]
-        flio["FAST-LIO<br/>LiDAR-inertial odometry + 3D map"]
+        flio["DLIO<br/>LiDAR-inertial odometry + 3D map"]
     end
 
     subgraph PLAN["Planning + control (ROS 2)"]
@@ -41,10 +41,10 @@ flowchart TB
     bridge["unitree bridge<br/>SDK2 / CycloneDDS"]
 
     lidar -->|raw cloud + imu| prep --> flio
-    flio -->|odometry /g1/pose| astar
-    flio -->|odometry /g1/pose| mpc
-    flio -->|obstacle cloud + map| astar
-    flio -->|obstacle cloud| mpc
+    flio -->|odometry /dlio/odom_node/odom| astar
+    flio -->|odometry /dlio/odom_node/odom| mpc
+    flio -->|deskewed cloud + map| astar
+    flio -->|deskewed cloud| mpc
     goal -->|/global_goal| astar
     astar -->|/a_star/path| mpc
     mpc -->|velocity_target vx,vy,yaw<br/>WS :8766| amo
@@ -66,9 +66,9 @@ The three `Navigation/docker` images and where each component runs:
 
 ```mermaid
 flowchart LR
-    subgraph loc["localization image<br/>(ros:humble + Open3D + Livox SDK)"]
+    subgraph loc["localization image<br/>(ros:humble + PCL/Eigen/OpenMP + Livox-SDK2)"]
         prep2["livox_preprocess"]
-        flio2["FAST-LIO"]
+        flio2["DLIO"]
         plan2["A* + MPC planner (ROS 2)*"]
     end
 
@@ -82,7 +82,7 @@ flowchart LR
 
     robot2(["Unitree G1"])
 
-    flio2 -->|"/g1/pose, clouds (ROS 2)"| plan2
+    flio2 -->|"/dlio/odom_node/odom, clouds (ROS 2)"| plan2
     plan2 -->|"velocity_target (WS :8766)"| amo2
     amo2 <-->|"CycloneDDS lowcmd/lowstate"| robot2
     flio2 <-->|"CycloneDDS (LiDAR/IMU)"| robot2
@@ -96,8 +96,8 @@ perception, the AMO gait, and the Unitree bridge are packaged here.
 
 | Concern | Image | Transport in | Transport out |
 |---|---|---|---|
-| Point-cloud cleanup + FAST-LIO | `localization` | CycloneDDS (LiDAR/IMU) | ROS 2 topics |
-| A\* + MPC planning | ROS 2 (with `localization`) | ROS 2 (`/g1/pose`, clouds, `/global_goal`) | **WebSocket `:8766`** |
+| Point-cloud cleanup + DLIO | `localization` | CycloneDDS (LiDAR/IMU) | ROS 2 topics |
+| A\* + MPC planning | ROS 2 (with `localization`) | ROS 2 (`/dlio/odom_node/odom`, clouds, `/global_goal`) | **WebSocket `:8766`** |
 | AMO gait + smoothing | `amo_policy` | WS `:8766` (velocity) + DDS (robot state) | CycloneDDS `rt/lowcmd` |
 | Teleop / Unitree bridge / RViz | `unitree` | DDS / ROS 2 | DDS / ROS 2 |
 
@@ -140,25 +140,30 @@ flowchart LR
 
 | Interface | Type | Producer → Consumer | Payload |
 |---|---|---|---|
-| `rt/lowstate` | CycloneDDS | robot → AMO / FAST-LIO | IMU, joint state |
+| `rt/lowstate` | CycloneDDS | robot → AMO / DLIO | IMU, joint state |
 | `rt/lowcmd` | CycloneDDS | AMO → robot | 29-DoF PD targets + gains |
-| LiDAR/IMU | CycloneDDS | MID-360 → FAST-LIO | point cloud + IMU |
-| `/g1/pose`, `/odom`, TF | ROS 2 | FAST-LIO → A\*/MPC | localization pose |
-| obstacle cloud, map | ROS 2 | FAST-LIO → A\*/MPC | planning inputs |
+| LiDAR/IMU | CycloneDDS | MID-360 → DLIO | point cloud + IMU |
+| `/dlio/odom_node/odom`, TF `odom→base_link` | ROS 2 | DLIO → A\*/MPC | localization odometry |
+| deskewed cloud, map | ROS 2 | DLIO → A\*/MPC | planning inputs |
 | `/global_goal` | ROS 2 | RViz/goal → A\* | navigation goal |
 | `/a_star/path` | ROS 2 | A\* → MPC | global/local path |
 | `velocity_target` | WebSocket `:8766` | MPC → AMO | `vx, vy, yaw_rate` |
 
 > Note on the MID-360: it is mounted inverted on the G1, so the IMU needs the
-> extrinsic correction handled in the FAST-LIO / driver config — see the
-> project memory on the inverted IMU before trusting odometry while walking.
+> extrinsic correction. On the real robot this is handled by DLIO's
+> `baselink2imu` rotation extrinsic = `R_x(180)` in `dlio_mid360_real.yaml`
+> (stock Livox driver) — see the project memory on the inverted IMU before
+> trusting odometry while walking. In sim the IMU is upright, so `dlio_sim.yaml`
+> uses identity extrinsics.
 
 ---
 
 ## 5. Bring-up order
 
 1. **Robot + DDS** reachable on the chosen NIC (`UNITREE_NET_IFACE`).
-2. **localization** — LiDAR preprocessing + FAST-LIO → pose/odometry stable.
+2. **localization** — LiDAR preprocessing + DLIO → pose/odometry stable. Keep the
+   robot **stationary for the first ~3 s** so DLIO can run its IMU + gravity
+   calibration before it starts moving.
 3. **planner** (A\* + MPC) — consumes pose + clouds + goal, emits `velocity_target`.
 4. **amo_policy** — `./docker/run_amo.sh` (or `docker compose run amo_policy …`).
    Staged snap-free activation runs first; then it tracks `velocity_target`

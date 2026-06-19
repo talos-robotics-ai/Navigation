@@ -11,7 +11,7 @@ Real MID-360:
 We model it as an RTX **rotary** multi-beam lidar: a vertical fan of beams
 spanning -7..+52 deg, spun 360 deg at 10 Hz. This is NOT the proprietary
 non-repetitive rosette, but it is a 360deg x (-7..+52) cloud at a comparable
-point rate that FAST-LIO consumes exactly like the real sensor's cloud -- and,
+point rate that DLIO consumes exactly like the real sensor's cloud -- and,
 unlike a hand-authored `solidState` config, the `rotary` scan type is the
 well-tested Isaac path that reliably produces returns. (An earlier solidState
 version produced EMPTY clouds: width=0 -- the emitter-state schema requires

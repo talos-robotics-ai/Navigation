@@ -5,8 +5,8 @@
 #
 #   # 1) Isaac on the host:
 #   Navigation/sim/launch_g1_sim.sh
-#   # 2) the bridge (for the *_custom / RELIABLE imu topics), e.g. in the container:
-#   ros2 launch g1_sim_bridge sim_localization.launch.py start_fastlio:=false
+#   # 2) the QoS relay (for the RELIABLE cloud/imu topics), e.g. in the container:
+#   ros2 launch g1_sim_bridge sim_localization.launch.py start_dlio:=false
 #   # 3) this script, in the container (sim/ is mounted at /sim by docker-compose):
 #   docker compose run --rm localization bash -lc 'bash /sim/verify_topics.sh'
 #   #   (or just run it from any sourced Humble shell on the same host + domain)
@@ -15,7 +15,7 @@
 set -uo pipefail
 
 source /opt/ros/humble/setup.bash 2>/dev/null || true
-# /ws/install has livox_ros_driver2 (CustomMsg) + g1_sim_bridge after `build_ws`.
+# /ws/install has direct_lidar_inertial_odometry + g1_sim_bridge after `build_ws`.
 [ -f /ws/install/setup.bash ] && source /ws/install/setup.bash 2>/dev/null || true
 
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
@@ -48,8 +48,11 @@ check() {  # name  : info + a few seconds of 'hz'
 echo "=== Isaac-published (raw) ==="
 for t in /clock /livox/lidar /livox/imu_raw; do check "$t"; done
 echo
-echo "=== g1_sim_bridge output (what FAST-LIO consumes) ==="
-for t in /livox/custom_msg /livox/imu; do check "$t"; done
+echo "=== g1_sim_bridge output (what DLIO consumes) ==="
+for t in /livox/lidar_reliable /livox/imu; do check "$t"; done
+echo
+echo "=== DLIO output (when start_dlio:=true) ==="
+for t in /dlio/odom_node/odom /dlio/odom_node/pointcloud/deskewed /dlio/map_node/map; do check "$t"; done
 echo
 
 echo "=== IMU Z sanity — linear_acceleration.z should be ~ +9.81 at rest ==="

@@ -1,0 +1,41 @@
+###########################################################################
+# DLIO — G1 simulation overrides.
+#
+# Layered ON TOP of the vendored DLIO defaults by sim_localization.launch.py:
+#   parameters = [ <pkg>/cfg/dlio.yaml, <pkg>/cfg/params.yaml, dlio_sim.yaml ]
+# Only the keys that differ from upstream for the Isaac-sim G1 are set here;
+# everything else (GICP/keyframe/submap tuning) is inherited from params.yaml.
+#
+# Isaac Sim feeds DLIO a plain-XYZ sensor_msgs/PointCloud2 on /livox/lidar and a
+# sensor_msgs/Imu on /livox/imu_raw. The g1_sim_bridge QoS relay republishes the
+# cloud RELIABLE (/livox/lidar_reliable) and the IMU on /livox/imu so DLIO's
+# subscribers match; DLIO then runs exactly as it would on the real MID-360.
+###########################################################################
+
+/**:
+  ros__parameters:
+
+    use_sim_time: true            # consume Isaac /clock
+
+    # G1 frame graph. DLIO broadcasts odom -> base_link -> {lidar, imu}.
+    frames/odom: odom
+    frames/baselink: base_link
+    frames/lidar: livox
+    frames/imu: livox_imu
+
+    # In sim the Isaac LiDAR + IMU are co-located in the MID-360 sensor frame,
+    # which we treat as base_link -> identity extrinsics.
+    extrinsics/baselink2imu/t: [ 0.0, 0.0, 0.0 ]
+    extrinsics/baselink2imu/R: [ 1., 0., 0.,
+                                 0., 1., 0.,
+                                 0., 0., 1. ]
+    extrinsics/baselink2lidar/t: [ 0.0, 0.0, 0.0 ]
+    extrinsics/baselink2lidar/R: [ 1., 0., 0.,
+                                   0., 1., 0.,
+                                   0., 0., 1. ]
+
+    # Isaac clouds are instantaneous snapshots (no per-point time field), so
+    # there is no rolling-shutter to undistort. DLIO already auto-detects this
+    # (sensor=UNKNOWN -> deskew off); set it explicitly to avoid synthesizing
+    # motion correction that did not happen.
+    pointcloud/deskew: false

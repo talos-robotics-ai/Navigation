@@ -1,0 +1,42 @@
+###########################################################################
+# DLIO — real G1 / Livox MID-360 overrides.
+#
+# Layered ON TOP of the vendored DLIO defaults (cfg/dlio.yaml + cfg/params.yaml).
+# Provided for the real-robot bring-up; Navigation currently only ships the sim
+# localization launch, so this file documents the real configuration that a
+# future real launch should load instead of dlio_sim.yaml.
+#
+# Inputs on the real robot come straight from the stock livox_ros_driver2:
+#   /livox/lidar  sensor_msgs/PointCloud2 (xfer_format=0, per-point timestamp ->
+#                 DLIO auto-detects SensorType::LIVOX and deskews)
+#   /livox/imu    sensor_msgs/Imu
+###########################################################################
+
+/**:
+  ros__parameters:
+
+    use_sim_time: false
+
+    frames/odom: odom
+    frames/baselink: base_link
+    frames/lidar: livox_frame
+    frames/imu: livox_imu
+
+    # The MID-360 is mounted UPSIDE-DOWN on the G1. The stock Livox driver
+    # applies MID360_config roll=180 to the CLOUD (so it arrives upright) but
+    # publishes the IMU RAW (still inverted). Unlike FAST-LIO's extrinsic_R
+    # (which only rotates LiDAR->IMU), DLIO's baselink2imu rotation genuinely
+    # re-orients the IMU into base_link, so a single R_x(180) here fixes the
+    # inverted IMU with the stock driver — no driver patch needed.
+    #   R_x(180) = diag(1, -1, -1)
+    extrinsics/baselink2imu/t: [ -0.011, -0.02329, 0.04412 ]
+    extrinsics/baselink2imu/R: [ 1.,  0.,  0.,
+                                 0., -1.,  0.,
+                                 0.,  0., -1. ]
+    # Cloud already upright (driver applied the mount roll): identity.
+    extrinsics/baselink2lidar/t: [ 0.0, 0.0, 0.0 ]
+    extrinsics/baselink2lidar/R: [ 1., 0., 0.,
+                                   0., 1., 0.,
+                                   0., 0., 1. ]
+
+    pointcloud/deskew: true

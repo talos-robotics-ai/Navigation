@@ -4,12 +4,14 @@
   <name>g1_sim_bridge</name>
   <version>0.1.0</version>
   <description>
-    Isaac Sim -> FAST-LIO bridge (simulation only). Converts the Isaac Sim
-    MID-360 output (/livox/lidar PointCloud2 + /livox/imu_raw Imu) into the
-    livox_ros_driver2/CustomMsg on /livox/custom_msg and a RELIABLE
-    /livox/imu, exactly as FAST_LIO_LOCALIZATION_HUMANOID (lidar_type:1)
-    expects. Not used on the real robot, where the Livox SDK driver emits
-    CustomMsg + /livox/imu natively.
+    Isaac Sim -> DLIO bridge (simulation only). A thin QoS relay that
+    republishes the Isaac Sim MID-360 output (/livox/lidar PointCloud2 +
+    /livox/imu_raw Imu, both BEST_EFFORT) as a RELIABLE /livox/lidar_reliable
+    cloud and a RELIABLE /livox/imu so DLIO (direct_lidar_inertial_odometry)
+    can consume them directly. Also ships the G1 DLIO configs (dlio_sim.yaml,
+    dlio_mid360_real.yaml) and the sim localization launch. Not used on the
+    real robot, where the Livox SDK driver publishes /livox/lidar + /livox/imu
+    natively.
   </description>
   <maintainer email="lorenzo.ortolani@talosrobotics.ai">Lorenzo Ortolani</maintainer>
   <license>Apache-2.0</license>
@@ -17,9 +19,8 @@
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>sensor_msgs_py</depend>
-  <depend>livox_ros_driver2</depend>
   <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>fast_lio</exec_depend>
+  <exec_depend>direct_lidar_inertial_odometry</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 
   <buildtool_depend>ament_python</buildtool_depend>

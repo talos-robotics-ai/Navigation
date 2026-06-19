@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Launch Isaac Sim with the Unitree G1 + a Livox MID-360 LiDAR and IMU, all
-# published to ROS 2 the way FAST_LIO_LOCALIZATION_HUMANOID expects.
+# published to ROS 2 for the DLIO (direct_lidar_inertial_odometry) stack.
 #
 #   /livox/lidar  (sensor_msgs/PointCloud2, frame=livox_frame)
 #   /livox/imu    (sensor_msgs/Imu,         frame=livox_frame)
 #   /clock        (rosgraph_msgs/Clock)
 #
-# A companion ROS 2 node (g1_sim_bridge, in Navigation/ros2_ws) converts
-# /livox/lidar -> /livox/custom_msg + /livox/imu_raw -> /livox/imu for FAST-LIO
-# (lidar_type:1). See Navigation/sim/README.md.
+# A companion ROS 2 node (g1_sim_bridge, in Navigation/ros2_ws) QoS-relays
+# /livox/lidar -> /livox/lidar_reliable + /livox/imu_raw -> /livox/imu so DLIO's
+# RELIABLE cloud subscriber matches. See Navigation/sim/README.md.
 #
 # Usage:
 #   ./launch_g1_sim.sh                # GUI
@@ -32,7 +32,7 @@ if [[ ! -x "$ISAAC_DIR/python.sh" ]]; then
 fi
 
 # --- ROS 2 transport: match the navigation stack (Humble + CycloneDDS) ------
-# FORCE humble: the deploy stack (livox_ros_driver2, FAST-LIO, mid360.yaml) is
+# FORCE humble: the deploy stack (livox_ros_driver2, DLIO, dlio_sim.yaml) is
 # built for ROS 2 Humble. If a /opt/ros/jazzy is sourced in your shell, Isaac
 # otherwise picks up ROS_DISTRO=jazzy and its bundled jazzy bridge, which does
 # NOT interoperate with the Humble nodes (different typesupport).
