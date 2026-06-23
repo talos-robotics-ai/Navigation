@@ -203,6 +203,14 @@ see [`simulation_stack.md`](simulation_stack.md).)
     ```
     Keep the robot still for the first ~3 s (IMU + gravity calibration).
 
+    > **No pre-DLIO ground filter.** DLIO consumes the **raw** `/livox/lidar`
+    > cloud — the old `ground_removal` node (and the `ground_removal:=` arg) were
+    > removed, because stripping the ground upstream robs the LiDAR-inertial
+    > odometry of its pitch/roll/Z constraint. Ground removal now lives
+    > **downstream** in `g1_local_map`, gravity-aware on the accumulated cloud
+    > (see [`GROUND_REMOVAL_PLAN.md`](GROUND_REMOVAL_PLAN.md) /
+    > [`LOCAL_VOXEL_MAP.md`](LOCAL_VOXEL_MAP.md) §3).
+
 18. 🤖 Start the AMO policy in **joystick (WebSocket) mode**. `JOYSTICK=1` makes
     `run_amo.sh` both (a) launch the gamepad→`/cmd_vel`→WebSocket nodes detached
     in the `localization` container (`real_teleop.launch.py`) and (b) run

@@ -77,21 +77,41 @@ re-centring**; the robot-centred window is enforced purely by the prune step.
 > for the floor to be a reliable per-cell minimum. **This ordering is the fix for
 > the "empty map" bug — never segment a single scan.**
 
-### 3. Ground removal — per-cell lowest-point segmentation
-Run on the **accumulated (dense)** voxel centres (`segment_obstacles`):
-1. Bin points into XY cells of size `ground_cell` (default **0.25 m**).
-2. The **lowest z** in each cell is the *local ground height* for that cell.
-3. A point is an **obstacle** iff its height above its cell's local ground is in
-   `(ground_thresh, max_height]` (defaults **0.10 m … 2.0 m**).
-   - `≤ ground_thresh` above local ground → **ground**, discarded.
-   - `> max_height` above local ground → ceiling / overhead, discarded.
+### 3. Ground removal — gravity-aware SVD plane segmentation
+Run on the **accumulated (dense)** voxel centres by
+`ground_segmentation.segment_ground` (a pure-numpy, ROS-free module; full design
+in [`docs/GROUND_REMOVAL_PLAN.md`](GROUND_REMOVAL_PLAN.md)). odom is
+gravity-aligned by DLIO at init, so "up" is **+Z** and gravity `g_hat ≈ (0,0,-1)`
+comes **for free** as a constant.
 
-This is **slope- and step-robust** and independent of the absolute floor level
-(which drifts slowly with DLIO odom), because ground is estimated *per cell*
-rather than as one global plane or a fixed `z` threshold.
+1. **Tile** the cloud into XY cells of size `ground_cell` (default **0.40 m**);
+   drop cells with `< ground_min_pts` points.
+2. **Fit a plane per cell** from the 3×3 covariance eigendecomposition
+   (`np.linalg.eigh`, batched, no Python loop): the smallest-eigenvalue
+   eigenvector is the normal (oriented up); `thickness = √λ₀`,
+   `planarity = √(λ₀/λ₁)`.
+3. **Ground-candidate** cell ⇔ planar (`thickness < ground_flat_max`,
+   `planarity < ground_planarity_max`) **and** its normal is within
+   `ground_slope_tol_deg` of vertical — this admits ramps/slopes but rejects walls.
+4. **Region-grow** the ground *manifold* from seed cells at the robot's foot
+   height (`robot_z − ground_leg_offset ± ground_seed_band`) across 8-neighbour
+   candidate cells whose planes stay **continuous** (height jump `< ground_step_tol`).
+   The surface may bend (ramp) but breaks at curbs/steps, and **elevated flat
+   slabs** (shelf/table tops) stay obstacles because they don't connect.
+5. **Label** each point by its cell: in a manifold cell, signed distance `d` to
+   the cell plane decides ground (`|d| ≤ ground_band` → drop) vs obstacle
+   (`ground_band < d ≤ max_height` → keep); points in non-manifold cells are
+   **kept** (fail-open) up to `max_height` above the foot.
 
-Vectorised with `numpy` (`np.minimum.at` over a compact 1-D cell key), so it is
-O(points) with no Python loop over cells.
+This is **slope- and step-robust** and gravity-referenced rather than relying on
+a per-cell lowest point (which one stray low return could drag down). It also
+distinguishes a *connected* ground surface from elevated horizontal slabs, which
+the old lowest-point method could not.
+
+**Fail-safe by construction:** an empty / `< ground_min_total` cloud, or a cloud
+with no ground manifold (e.g. robot on a table, bad init gravity) never blanks the
+obstacle cloud — geometry passes through (capped at `max_height`) and the node logs
+a throttled warning. Better a cluttered costmap than a blind one.
 
 ### 4. Publish
 The surviving obstacle voxel centres are published as `~/obstacles` and
@@ -160,8 +180,16 @@ These were learned the hard way on this stack (see
 | `half_width` | `8.0` m | Rolling-window half-extent |
 | `voxel_size` | `0.10` m | Voxel edge = costmap resolution |
 | `persistence_s` | `3.0` s | Voxel memory before decay |
-| `ground_cell` | `0.25` m | XY cell for local-ground estimation |
-| `ground_thresh` | `0.10` m | Height above local ground ⇒ obstacle |
+| `ground_cell` | `0.40` m | XY tile size for the per-cell plane fit |
+| `ground_min_pts` | `12` | Min points to fit a cell plane |
+| `ground_planarity_max` | `0.10` | `√(λ₀/λ₁)` upper bound for "planar" |
+| `ground_flat_max` | `0.05` m | `√λ₀` (absolute flatness) upper bound |
+| `ground_slope_tol_deg` | `30.0`° | Max plane↔gravity angle counted as ground (set to steepest ramp) |
+| `ground_step_tol` | `0.08` m | Max edge height jump to keep region-growing (smallest curb kept) |
+| `ground_band` | `0.06` m | `|dist to ground plane|` ≤ this ⇒ ground |
+| `ground_seed_band` | `0.15` m | Foot-height window for seed cells |
+| `ground_leg_offset` | `1.0` m | `robot_z` (sensor, odom) → foot height drop |
+| `ground_min_total` | `200` | Below this many accumulated points, pass through |
 | `max_height` | `2.0` m | Ignore points above this over ground |
 | `z_below` / `z_above` | `1.5` / `1.5` m | Vertical crop relative to sensor |
 | `min_range` | `0.4` m | Drop returns within this radius (self-hits) |

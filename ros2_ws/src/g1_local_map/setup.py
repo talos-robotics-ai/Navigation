@@ -25,7 +25,6 @@ setup(
     entry_points={
         'console_scripts': [
             'local_voxel_map_node = g1_local_map.local_voxel_map_node:main',
-            'ground_removal_node = g1_local_map.ground_removal_node:main',
         ],
     },
 )

@@ -6,9 +6,11 @@ vector**, so the floor is removed correctly while the robot pitches/rolls during
 gait and while it traverses surfaces that are **tilted differently** (ramps,
 slopes, multi-level floors).
 
-Status: design. No code yet. Supersedes `g1_local_map/ground_removal_node.py`
-(to be deleted) and `segment_obstacles()` in `local_voxel_map_node.py`
-(to be replaced).
+Status: **implemented**. `ground_removal_node.py` deleted and
+`segment_obstacles()` replaced by `g1_local_map/ground_segmentation.py`
+(`segment_ground`), wired into `local_voxel_map_node.py`. DLIO now consumes the
+raw `/livox/lidar` (no pre-DLIO ground filter / `ground_removal:=` arg). Params in
+`config/local_map.yaml` (`ground_*`); see [`LOCAL_VOXEL_MAP.md`](LOCAL_VOXEL_MAP.md) §3.
 
 ---
 

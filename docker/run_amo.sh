@@ -41,22 +41,15 @@ if [[ "${BUILD:-0}" == "1" ]]; then
     "${DC[@]}" build "${SERVICE}"
 fi
 
-# JOYSTICK=1: drive the robot with the Unitree G1 gamepad. That path
-# (joy_node -> joy_to_cmdvel -> /cmd_vel -> cmd_vel_to_amo -> ws:8766) is all
-# non-interactive, so start it detached in the ROS 2 (localization) container and
-# force amo_inference onto the websocket command source it feeds.
+# JOYSTICK=1: drive the robot with the Unitree G1 gamepad. The pad is delivered
+# by the robot inside LowState.wireless_remote (the same DDS LowState the policy
+# already subscribes to), so amo_inference reads it in-process -- no ROS /joy
+# node, no rt/wireless_controller topic, no websocket bridge. Hold the deadman
+# button (default R1) to move; release to stop.
 AMO_EXTRA=()
 if [[ "${JOYSTICK:-0}" == "1" ]]; then
-    LOC_SVC="${LOCALIZATION_CONTAINER:-localization}"
-    echo ">> JOYSTICK: starting gamepad teleop (real_teleop.launch.py) in '${LOC_SVC}' ..."
-    if docker exec -d "${LOC_SVC}" bash -lc \
-        'source /opt/ros/humble/setup.bash && source /ws/install/setup.bash && \
-         exec ros2 launch g1_sim_bridge real_teleop.launch.py'; then
-        echo ">> teleop running (stop: docker exec ${LOC_SVC} pkill -f real_teleop)"
-    else
-        echo ">> WARNING: could not start teleop in '${LOC_SVC}' (is it up + g1_sim_bridge built?)" >&2
-    fi
-    AMO_EXTRA+=(--command_source websocket)
+    echo ">> JOYSTICK: G1 pad via LowState.wireless_remote (hold R1 to move) ..."
+    AMO_EXTRA+=(--command_source joystick)
 fi
 
 echo ">> running AMO inference on ${SERVICE} (NIC=${UNITREE_NET_IFACE}, config=${CONFIG})"

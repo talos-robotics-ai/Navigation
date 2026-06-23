@@ -163,6 +163,23 @@ finer detail (`0.10–0.15`) at higher CPU cost; for large/outdoor runs go coars
 (`0.3–0.5`) to bound memory. Keep `voxelFilter/res` and `map/sparse/leafSize`
 in the same ballpark.
 
+### 2.5 Ground removal is downstream of DLIO — not a DLIO param
+
+DLIO ingests the **raw** cloud (no pre-DLIO ground filter — the ground is a
+pitch/roll/Z constraint the odometry needs). The floor is removed **after** DLIO,
+inside `g1_local_map` (`ground_segmentation.segment_ground`), gravity-aware on the
+accumulated odom cloud. Its tunables live in
+[`g1_local_map/config/local_map.yaml`](../ros2_ws/src/g1_local_map/config/local_map.yaml)
+(`ground_*`), documented in [`LOCAL_VOXEL_MAP.md`](LOCAL_VOXEL_MAP.md) §3 and
+[`GROUND_REMOVAL_PLAN.md`](GROUND_REMOVAL_PLAN.md). The two knobs you most likely
+touch: `ground_slope_tol_deg` (raise to traverse steeper ramps) and
+`ground_step_tol` (lower to keep shorter curbs as obstacles).
+
+> **Gravity sanity check (§2.2 ties in here).** The segmentation trusts that odom
+> is gravity-aligned. Fit a plane to a known-flat floor patch and confirm its
+> normal is within ~2° of vertical; a larger error means DLIO's init gravity is
+> off — fix calibration (§2.2) first, segmentation can't paper over a tilted world.
+
 ---
 
 ## 3. Usually leave alone (review only if you have a problem)
@@ -192,4 +209,6 @@ in the same ballpark.
       `geo/*` gains.
 
 See [`DLIO_DEPLOYMENT_TESTING.md`](DLIO_DEPLOYMENT_TESTING.md) for the ordered
-bring-up + test sequence that exercises each of these.
+bring-up + test sequence that exercises each of these, and
+[`DLIO_MAP_SAVE_LOAD.md`](DLIO_MAP_SAVE_LOAD.md) for saving the map and the (im)possibility
+of reloading it next session.

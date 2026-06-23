@@ -38,8 +38,11 @@ filter:                    # layers C + D: smoothing that eases joints onto the 
   release_ramp_s: 1.0      # fade-out window so the hand-off has no discontinuity
 
 command:                   # velocity command source (vx, vy, yaw)
-  source: zero             # zero (stand) | constant | websocket
+  source: zero             # zero (stand) | constant | websocket | joystick
   constant: [0.0, 0.0, 0.0]
   max_forward_vel: 0.8     # rad/s and m/s caps used to normalise the command
   max_yaw_rate: 0.4
   websocket_port: 8766     # MPC /velocity_target interface when source=websocket
+  joystick:                # source=joystick: Unitree G1 pad via LowState.wireless_remote
+    deadman_button: R1     # hold to move; "" = always-on. (R1/L1/R2/L2/A/B/X/Y/Start/Select/...)
+    deadzone: 0.08         # stick magnitude below this reads as 0

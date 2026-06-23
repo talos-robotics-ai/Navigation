@@ -20,10 +20,22 @@
     voxel_size:    0.10   # 3D voxel edge (m) — also the costmap resolution
     persistence_s: 3.0    # voxel memory before temporal decay (s); densifies sparse MID-360
 
-    # ── ground removal (per-cell lowest-point segmentation, on accumulated cloud) ──
-    ground_cell:   0.25   # XY cell for local-ground estimation (m)
-    ground_thresh: 0.10   # height above local ground to count as obstacle (m)
-    max_height:    2.0    # ignore points more than this above local ground (m) — drops ceiling
+    # ── ground removal (gravity-aware SVD plane segmentation, on accumulated cloud) ──
+    # See docs/GROUND_REMOVAL_PLAN.md. odom is gravity-aligned by DLIO at init, so
+    # "up" is +Z; cells fit a plane (eigen of the 3x3 covariance) and are kept as
+    # ground when planar AND within slope_tol of vertical AND connected (region
+    # grown from foot-height seeds) — so ramps are removed but curbs/steps survive.
+    ground_cell:          0.40   # XY tile size for the per-cell plane fit (m)
+    ground_min_pts:       12     # min points to fit a cell plane
+    ground_planarity_max: 0.10   # sqrt(lambda0/lambda1) upper bound for "planar"
+    ground_flat_max:      0.05   # sqrt(lambda0) upper bound (m) — absolute flatness
+    ground_slope_tol_deg: 30.0   # max plane<->gravity angle counted as ground (deg) — set to steepest ramp
+    ground_step_tol:      0.08   # max height jump across a cell edge to keep growing (m) — smallest curb to keep
+    ground_band:          0.06   # |signed dist to ground plane| <= this => ground (m)
+    ground_seed_band:     0.15   # foot-height window for seed cells (m)
+    ground_leg_offset:    1.0    # robot_z (sensor, odom) -> foot height drop (m); depends on sensor mount height
+    ground_min_total:     200    # below this many accumulated points, pass the cloud through
+    max_height:           2.0    # ignore points more than this above ground (m) — drops ceiling
     # The DLIO odom origin sits at the sensor (~1 m above the floor), so z_below
     # MUST reach BELOW the floor or ground segmentation has no ground reference
     # and the floor leaks through as obstacles.

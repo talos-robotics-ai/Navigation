@@ -11,8 +11,9 @@ Per incoming scan (~10 Hz):
     1. crop to a robot-centred rolling window (±half_width, vertical band)
     2. accumulate the RAW cropped points into a voxel grid (odom frame) with
        per-voxel temporal decay  ── this DENSIFIES the sparse MID-360 scans
-    3. ground removal on the ACCUMULATED (dense) cloud — per-cell lowest-point
-       segmentation (see docs/LOCAL_VOXEL_MAP.md)
+    3. ground removal on the ACCUMULATED (dense) cloud — gravity-aware per-cell
+       SVD/eigen plane segmentation (ground_segmentation.segment_ground; see
+       docs/GROUND_REMOVAL_PLAN.md and docs/LOCAL_VOXEL_MAP.md)
     4. publish:
          <ns>/obstacles    PointCloud2    ground-removed obstacle voxel centres,
                                           odom frame → planner `obstacle_topic`
@@ -41,6 +42,8 @@ from sensor_msgs.msg import PointCloud2
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 
+from g1_local_map.ground_segmentation import GroundParams, segment_ground
+
 
 def read_xyz(msg: PointCloud2) -> np.ndarray:
     """Extract an (N, 3) float64 array of xyz from a PointCloud2 (NaNs dropped)."""
@@ -53,31 +56,6 @@ def read_xyz(msg: PointCloud2) -> np.ndarray:
         if rec.dtype.names:
             return np.column_stack([rec["x"], rec["y"], rec["z"]]).astype(np.float64)
         return rec.astype(np.float64).reshape(-1, 3)
-
-
-def segment_obstacles(xyz: np.ndarray, ground_cell: float, ground_thresh: float,
-                      max_height: float) -> np.ndarray:
-    """Per-cell lowest-point ground segmentation.
-
-    Bin points into XY cells of size ``ground_cell``; the lowest point in each
-    cell is taken as the local ground. Keep points whose height above that local
-    ground is in (``ground_thresh``, ``max_height``]. Slope/step robust and
-    independent of the absolute floor level (which drifts with DLIO odom).
-
-    MUST be fed an accumulated/dense cloud — on a single sparse scan each cell
-    has too few points for the floor to be a reliable minimum.
-    """
-    if xyz.shape[0] == 0:
-        return xyz
-    gx = np.floor(xyz[:, 0] / ground_cell).astype(np.int64)
-    gy = np.floor(xyz[:, 1] / ground_cell).astype(np.int64)
-    # Compact 1-D cell key (offset to stay non-negative and collision-free).
-    key = (gx - gx.min()) * (gy.max() - gy.min() + 1) + (gy - gy.min())
-    uniq, inv = np.unique(key, return_inverse=True)
-    cell_min = np.full(uniq.shape[0], np.inf, dtype=np.float64)
-    np.minimum.at(cell_min, inv, xyz[:, 2])
-    height = xyz[:, 2] - cell_min[inv]
-    return xyz[(height > ground_thresh) & (height <= max_height)]
 
 
 class VoxelAccumulator:
@@ -135,8 +113,6 @@ class LocalVoxelMapNode(Node):
 
         self.half_width = float(p("half_width", 8.0).value)        # rolling window half-extent (m)
         self.voxel_size = float(p("voxel_size", 0.10).value)       # 3D voxel edge (m) = costmap reso
-        self.ground_cell = float(p("ground_cell", 0.25).value)     # XY cell for local-ground estimate (m)
-        self.ground_thresh = float(p("ground_thresh", 0.10).value)  # height above ground => obstacle (m)
         self.max_height = float(p("max_height", 2.0).value)        # ignore points this far above ground (m)
         self.z_below = float(p("z_below", 1.5).value)              # vertical crop below robot/sensor (m)
         self.z_above = float(p("z_above", 1.5).value)              # vertical crop above robot/sensor (m)
@@ -144,6 +120,23 @@ class LocalVoxelMapNode(Node):
         self.min_range = float(p("min_range", 0.4).value)          # drop self-hits within this radius (m)
         self.publish_costmap = bool(p("publish_costmap", True).value)
         self.costmap_unknown_as = int(p("costmap_unknown_as", -1).value)  # -1 unknown / 0 free
+
+        # ── gravity-aware SVD ground segmentation (see ground_segmentation.py) ──
+        self.ground_params = GroundParams(
+            cell=float(p("ground_cell", 0.40).value),            # XY tile for the plane fit (m)
+            min_pts=int(p("ground_min_pts", 12).value),          # min points to fit a cell plane
+            planarity_max=float(p("ground_planarity_max", 0.10).value),  # sqrt(l0/l1) "planar" bound
+            flat_max=float(p("ground_flat_max", 0.05).value),    # sqrt(l0) absolute flatness (m)
+            slope_tol_deg=float(p("ground_slope_tol_deg", 30.0).value),  # max plane<->gravity angle (deg)
+            step_tol=float(p("ground_step_tol", 0.08).value),    # max edge height jump to keep growing (m)
+            ground_band=float(p("ground_band", 0.06).value),     # |dist to plane| <= this => ground (m)
+            seed_band=float(p("ground_seed_band", 0.15).value),  # foot-height window for seeds (m)
+            leg_offset=float(p("ground_leg_offset", 1.0).value),  # robot_z(sensor) -> foot drop (m)
+            max_height=self.max_height,
+            min_total=int(p("ground_min_total", 200).value),     # below this, pass cloud through
+        )
+        # odom is gravity-aligned by DLIO at init, so "up" is +Z and g points down.
+        self.g_hat = np.array([0.0, 0.0, -1.0], dtype=np.float64)
 
         self.frame_id = "odom"
         self.robot_xyz = np.zeros(3, dtype=np.float64)
@@ -183,7 +176,8 @@ class LocalVoxelMapNode(Node):
         self.get_logger().info(
             f"local_voxel_map up | cloud={self.cloud_topic} odom={self.odom_topic} | "
             f"window=±{self.half_width:.1f}m voxel={self.voxel_size:.2f}m "
-            f"ground_thresh={self.ground_thresh:.2f}m persistence={self.persistence_s:.1f}s"
+            f"ground(cell={self.ground_params.cell:.2f}m slope_tol={self.ground_params.slope_tol_deg:.0f}deg "
+            f"step_tol={self.ground_params.step_tol:.2f}m) persistence={self.persistence_s:.1f}s"
         )
 
     def _on_odom(self, msg: Odometry) -> None:
@@ -217,18 +211,29 @@ class LocalVoxelMapNode(Node):
         self.accum.prune(now_s, (cx, cy), self.half_width)
         raw_centers = self.accum.centers()
 
-        # 3. ground removal on the dense accumulated cloud.
-        obstacles = (
-            segment_obstacles(raw_centers, self.ground_cell, self.ground_thresh, self.max_height)
-            if raw_centers.shape[0] else raw_centers
-        )
+        # 3. gravity-aware SVD ground removal on the dense accumulated cloud.
+        if raw_centers.shape[0]:
+            obstacles, seg_info = segment_ground(
+                raw_centers, self.g_hat, cz, self.ground_params, return_info=True)
+        else:
+            obstacles, seg_info = raw_centers, {"status": "empty", "manifold_found": False,
+                                                "ground_cells": 0, "candidate_cells": 0}
+
+        # Throttled warning when no ground manifold is found (e.g. robot on a table,
+        # bad init gravity): we then keep everything rather than blank the cloud.
+        if raw_centers.shape[0] and not seg_info["manifold_found"]:
+            self.get_logger().warning(
+                f"ground segmentation found no manifold ({seg_info['status']}, "
+                f"candidates={seg_info['candidate_cells']}) — passing cloud through",
+                throttle_duration_sec=5.0)
 
         # Pipeline heartbeat (~1 Hz) — shows where data is lost if the map looks empty.
         self._tick = getattr(self, "_tick", 0) + 1
         if self._tick <= 5 or self._tick % 10 == 0:
             self.get_logger().info(
                 f"in={xyz.shape[0]} cropped={cropped.shape[0]} "
-                f"accum_vox={raw_centers.shape[0]} obstacles={obstacles.shape[0]} | "
+                f"accum_vox={raw_centers.shape[0]} obstacles={obstacles.shape[0]} "
+                f"ground_cells={seg_info['ground_cells']} | "
                 f"robot=({cx:.2f},{cy:.2f},{cz:.2f}) zband=[{cz - self.z_below:.2f},{cz + self.z_above:.2f}]")
 
         # 4. publish every scan (even when empty) so the costmap stays live.

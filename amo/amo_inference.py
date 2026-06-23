@@ -28,6 +28,7 @@ import argparse
 import logging
 import os
 import signal
+import struct
 import sys
 import threading
 import time
@@ -61,6 +62,7 @@ DEFAULT_CONFIG = {
     "command": {
         "source": "zero", "constant": [0.0, 0.0, 0.0],
         "max_forward_vel": 0.8, "max_yaw_rate": 0.4, "websocket_port": 8766,
+        "joystick": {"deadman_button": "R1", "deadzone": 0.08},
     },
 }
 
@@ -149,7 +151,69 @@ def start_websocket_source(source: CommandSource, port: int) -> None:
     threading.Thread(target=_run, daemon=True, name="ws-command").start()
 
 
-def build_command_source(cmd_cfg: dict, cli_const) -> CommandSource:
+class JoystickCommandSource(CommandSource):
+    """(vx, vy, yaw) straight from the Unitree G1 gamepad, with NO extra DDS topic.
+
+    The pad is delivered by the robot inside the 40-byte ``wireless_remote`` blob
+    of the LowState the AMO env already subscribes to (rt/lowstate) -- the same
+    bytes RoboJuDo's UnitreeEnv parses. We never touch /joy or rt/wireless_controller
+    (the latter is typically NOT published on the G1).
+
+    Sign/scale are the exact inverse of ``AmoDeployment._build_ctrl`` so the command
+    we emit reproduces precisely the policy axes a RoboJuDo-native joystick produces:
+
+        vx  = LeftY  * max_forward_vel   (stick forward -> walk forward)
+        vy  = LeftX  * max_forward_vel   (stick left    -> strafe left)
+        yaw = -RightX * max_yaw_rate     (stick left    -> turn ccw)
+
+    A deadman button gates motion: the command is zero unless it is held. Byte
+    offsets and the button-bit layout match robojudo/controller/utils/joystick.py.
+    """
+
+    _BUTTON_BITS = {  # bit index within the uint16 `keys` word
+        "R1": 0, "L1": 1, "Start": 2, "Select": 3, "R2": 4, "L2": 5,
+        "F1": 6, "F2": 7, "A": 8, "B": 9, "X": 10, "Y": 11,
+        "Up": 12, "Right": 13, "Down": 14, "Left": 15,
+    }
+
+    def __init__(self, dep, max_forward_vel, max_yaw_rate,
+                 deadzone=0.08, deadman_button="R1"):
+        super().__init__()
+        self._dep = dep
+        self._max_v = float(max_forward_vel)
+        self._max_w = float(max_yaw_rate)
+        self._dz = float(deadzone)
+        self._deadman_bit = (self._BUTTON_BITS.get(deadman_button)
+                             if deadman_button else None)
+        self._missing_warned = False
+
+    def _dz_clip(self, v: float) -> float:
+        v = float(v)
+        return 0.0 if abs(v) < self._dz else v
+
+    def get(self) -> np.ndarray:
+        env = getattr(self._dep, "env", None)
+        low_state = getattr(env, "low_state", None) if env is not None else None
+        raw = getattr(low_state, "wireless_remote", None) if low_state is not None else None
+        if raw is None or len(raw) < 24:
+            if not self._missing_warned:
+                logger.warning("joystick: LowState.wireless_remote unavailable; holding zero")
+                self._missing_warned = True
+            return np.zeros(3, dtype=np.float32)
+        buf = bytes(bytearray(raw))
+        keys = struct.unpack_from("<H", buf, 2)[0]
+        if self._deadman_bit is not None and not ((keys >> self._deadman_bit) & 1):
+            return np.zeros(3, dtype=np.float32)        # deadman released -> stop
+        left_x = struct.unpack_from("<f", buf, 4)[0]    # offsets: lx@4 rx@8 ry@12 ly@20
+        right_x = struct.unpack_from("<f", buf, 8)[0]
+        left_y = struct.unpack_from("<f", buf, 20)[0]
+        vx = self._dz_clip(left_y) * self._max_v
+        vy = self._dz_clip(left_x) * self._max_v
+        yaw = -self._dz_clip(right_x) * self._max_w
+        return np.asarray([vx, vy, yaw], dtype=np.float32)
+
+
+def build_command_source(cmd_cfg: dict, cli_const, dep=None) -> CommandSource:
     source = CommandSource()
     kind = (cmd_cfg.get("source") or "zero").lower()
     if cli_const is not None:
@@ -161,6 +225,18 @@ def build_command_source(cmd_cfg: dict, cli_const) -> CommandSource:
     elif kind == "websocket":
         start_websocket_source(source, int(cmd_cfg.get("websocket_port", 8766)))
         logger.info("command source: websocket :%s", cmd_cfg.get("websocket_port"))
+    elif kind == "joystick":
+        jcfg = cmd_cfg.get("joystick") or {}
+        deadman = jcfg.get("deadman_button", "R1")
+        source = JoystickCommandSource(
+            dep,
+            max_forward_vel=cmd_cfg.get("max_forward_vel", 0.8),
+            max_yaw_rate=cmd_cfg.get("max_yaw_rate", 0.4),
+            deadzone=float(jcfg.get("deadzone", 0.08)),
+            deadman_button=deadman,
+        )
+        logger.info("command source: joystick (G1 pad via LowState.wireless_remote, "
+                    "deadman=%s)", deadman or "<always-on>")
     else:
         logger.info("command source: zero (stand in place)")
     return source
@@ -226,7 +302,7 @@ def run(cfg: dict) -> int:
         release_ramp_s=float(filt.get("release_ramp_s", 0.0)),
     )
 
-    command_source = build_command_source(cmd_cfg, cfg.get("_cli_const"))
+    command_source = build_command_source(cmd_cfg, cfg.get("_cli_const"), dep)
 
     # Seed every smoothing layer at the current measured posture so the first
     # commanded delta is ~0 — the core anti-snap guarantee.
@@ -325,8 +401,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--vy", type=float, default=None, help="Constant lateral velocity.")
     p.add_argument("--yaw", type=float, default=None, help="Constant yaw rate.")
     p.add_argument("--command_source", default=None,
-                   choices=["zero", "constant", "websocket"],
-                   help="Override command.source (websocket = joystick via cmd_vel_to_amo).")
+                   choices=["zero", "constant", "websocket", "joystick"],
+                   help="Override command.source (joystick = G1 pad via LowState.wireless_remote; "
+                        "websocket = via cmd_vel_to_amo).")
     return p.parse_args(argv)
 
 

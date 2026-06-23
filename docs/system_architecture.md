@@ -24,8 +24,8 @@ flowchart TB
     lidar["Livox MID-360<br/>LiDAR + IMU"]
 
     subgraph PERC["Perception / localization"]
-        prep["livox_preprocess<br/>(point-cloud cleanup)"]
         flio["DLIO<br/>LiDAR-inertial odometry + 3D map"]
+        lvm["local_voxel_map<br/>accumulate + gravity-aware<br/>SVD ground removal"]
     end
 
     subgraph PLAN["Planning + control (ROS 2)"]
@@ -40,11 +40,11 @@ flowchart TB
 
     bridge["unitree bridge<br/>SDK2 / CycloneDDS"]
 
-    lidar -->|raw cloud + imu| prep --> flio
+    lidar -->|raw cloud + imu| flio
+    flio -->|deskewed cloud odom| lvm
+    lvm -->|/local_voxel_map/obstacles<br/>ground-removed cloud + costmap| astar
     flio -->|odometry /dlio/odom_node/odom| astar
     flio -->|odometry /dlio/odom_node/odom| mpc
-    flio -->|deskewed cloud + map| astar
-    flio -->|deskewed cloud| mpc
     goal -->|/global_goal| astar
     astar -->|/a_star/path| mpc
     mpc -->|velocity_target vx,vy,yaw<br/>WS :8766| amo
@@ -67,8 +67,8 @@ The three `Navigation/docker` images and where each component runs:
 ```mermaid
 flowchart LR
     subgraph loc["localization image<br/>(ros:humble + PCL/Eigen/OpenMP + Livox-SDK2)"]
-        prep2["livox_preprocess"]
         flio2["DLIO"]
+        lvm2["local_voxel_map<br/>(ground removal)"]
         plan2["A* + MPC planner (ROS 2)*"]
     end
 
@@ -82,7 +82,9 @@ flowchart LR
 
     robot2(["Unitree G1"])
 
-    flio2 -->|"/dlio/odom_node/odom, clouds (ROS 2)"| plan2
+    flio2 -->|"deskewed cloud (ROS 2)"| lvm2
+    flio2 -->|"/dlio/odom_node/odom (ROS 2)"| plan2
+    lvm2 -->|"obstacles / costmap (ROS 2)"| plan2
     plan2 -->|"velocity_target (WS :8766)"| amo2
     amo2 <-->|"CycloneDDS lowcmd/lowstate"| robot2
     flio2 <-->|"CycloneDDS (LiDAR/IMU)"| robot2
@@ -96,7 +98,7 @@ perception, the AMO gait, and the Unitree bridge are packaged here.
 
 | Concern | Image | Transport in | Transport out |
 |---|---|---|---|
-| Point-cloud cleanup + DLIO | `localization` | CycloneDDS (LiDAR/IMU) | ROS 2 topics |
+| DLIO + ground-removed local map | `localization` | CycloneDDS (LiDAR/IMU) | ROS 2 topics |
 | A\* + MPC planning | ROS 2 (with `localization`) | ROS 2 (`/dlio/odom_node/odom`, clouds, `/global_goal`) | **WebSocket `:8766`** |
 | AMO gait + smoothing | `amo_policy` | WS `:8766` (velocity) + DDS (robot state) | CycloneDDS `rt/lowcmd` |
 | Teleop / Unitree bridge / RViz | `unitree` | DDS / ROS 2 | DDS / ROS 2 |

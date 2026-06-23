@@ -1,13 +1,17 @@
 """Real-robot localization bring-up (DLIO + Livox MID-360).
 
 The real-robot counterpart of g1_sim_bridge/sim_localization.launch.py. The stock
-Livox SDK driver feeds DLIO directly, except the IMU is rescaled to m/s^2 first:
+Livox SDK driver feeds DLIO directly with the RAW cloud, except the IMU is
+rescaled to m/s^2 first:
 
-    livox_ros_driver2 --(/livox/lidar)--> ground_removal --(/livox/lidar_filtered)--> DLIO
+    livox_ros_driver2 --(/livox/lidar)--------------------------------------> DLIO
     livox_ros_driver2 --(/livox/imu  Imu, g) --> imu_rescale --(/livox/imu_ms2,
                                                   m/s^2)-------------------> DLIO
 
-(ground_removal is optional, arg ground_removal:=false -> DLIO reads raw /livox/lidar)
+There is NO pre-DLIO ground filter: the ground is a strong pitch/roll/Z constraint
+for the LiDAR-inertial odometry, so removing it upstream degrades DLIO. Ground
+removal happens DOWNSTREAM instead, inside g1_local_map on the accumulated
+odom-frame cloud (gravity-aware SVD; see docs/GROUND_REMOVAL_PLAN.md).
 
 Key real-robot specifics:
   * xfer_format=0 -> the driver emits a PointCloud2 (PointXYZRTLT) with per-point
@@ -42,7 +46,7 @@ from launch.actions import (
     DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -53,7 +57,6 @@ def generate_launch_description():
     livox_config = LaunchConfiguration('livox_config')
     start_map = LaunchConfiguration('start_map')
     local_map = LaunchConfiguration('local_map')
-    ground_removal = LaunchConfiguration('ground_removal')
     ros_domain_id = LaunchConfiguration('ros_domain_id')
 
     default_livox_config = os.path.join(
@@ -74,12 +77,6 @@ def generate_launch_description():
     declare_local_map = DeclareLaunchArgument(
         'local_map', default_value='true',
         description='Run g1_local_map (ground-removed rolling voxel map for the planner).')
-    declare_ground_removal = DeclareLaunchArgument(
-        'ground_removal', default_value='true',
-        description='Run ground_removal between the driver and DLIO so DLIO consumes a '
-                    'ground-removed cloud (/livox/lidar_filtered). NOTE: removing the '
-                    'ground before a LiDAR-inertial odometry can degrade it (loses the '
-                    'pitch/roll/Z constraint) — set false to feed DLIO the raw cloud.')
     declare_domain = DeclareLaunchArgument(
         'ros_domain_id', default_value='42',
         description='Dedicated DDS domain for the whole stack, isolating it from '
@@ -123,33 +120,16 @@ def generate_launch_description():
         }],
     )
 
-    # Optional ground-removal preprocessor: /livox/lidar -> /livox/lidar_filtered.
-    # Removes the ground plane per scan (RANSAC) while preserving every point
-    # field (incl. per-point timestamp DLIO deskews with). See ground_removal arg.
-    ground_removal_node = Node(
-        package='g1_local_map',
-        executable='ground_removal_node',
-        name='ground_removal',
-        output='screen',
-        parameters=[{
-            'input_topic': '/livox/lidar',
-            'output_topic': '/livox/lidar_filtered',
-        }],
-        condition=IfCondition(ground_removal),
-    )
-
-    # DLIO reads the filtered cloud when ground_removal is on, else the raw cloud.
-    dlio_pointcloud_topic = PythonExpression([
-        "'/livox/lidar_filtered' if '", ground_removal, "' == 'true' else '/livox/lidar'"])
-
     # Shared DLIO node bring-up, real variant: read the driver topics, real config.
+    # DLIO consumes the RAW cloud — ground removal is downstream in g1_local_map
+    # (it would otherwise rob DLIO of the ground pitch/roll/Z constraint).
     dlio = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             FindPackageShare('g1_sim_bridge'), '/launch/dlio.launch.py']),
         launch_arguments={
             'use_sim_time': 'false',
             'config_file': 'dlio_mid360_real.yaml',
-            'pointcloud_topic': dlio_pointcloud_topic,
+            'pointcloud_topic': '/livox/lidar',
             'imu_topic': '/livox/imu_ms2',
             'start_map': start_map,
         }.items(),
@@ -195,7 +175,6 @@ def generate_launch_description():
         declare_livox_config,
         declare_start_map,
         declare_local_map,
-        declare_ground_removal,
         declare_domain,
         # Pin the DDS domain for every node this launch spawns (must precede them).
         # Isolates the stack from the ROS 2 Jazzy host (domain 0), whose
@@ -208,7 +187,6 @@ def generate_launch_description():
         SetEnvironmentVariable('ROS_DOMAIN_ID', ros_domain_id),
         livox_driver,
         imu_rescale,
-        ground_removal_node,
         dlio,
         local_map_node,
         robot_model_launch,
