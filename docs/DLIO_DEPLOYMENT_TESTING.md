@@ -95,12 +95,16 @@ consistently, decoupled from gait dynamics.
      start closes the loop with small drift.
    - `/dlio/map_node/map` grows a coherent (non-smeared, non-double-walled) map.
    - Turning in place does not blow up the estimate (deskew sanity).
-9. Save a map to prove the round-trip:
+9. Save a map to prove the round-trip (sim runs on the default `ROS_DOMAIN_ID=0`,
+   so no export is needed here; if the call hangs on `waiting for service`, your
+   shell is on a different domain than `dlio_map_node`):
    ```bash
+   ros2 daemon stop && ros2 daemon start   # clear a stale CLI daemon if needed
    ros2 service call /save_pcd direct_lidar_inertial_odometry/srv/SavePCD \
-     "{leaf_size: 0.2, save_path: '/ws/maps/'}"
+     "{leaf_size: 0.05, save_path: '/ws/maps/'}"
    ```
-   **Pass:** a `.pcd` is written and looks like the scene in a viewer.
+   **Pass:** a `.pcd` is written and looks like the scene in a viewer (see
+   [`DLIO_MAP_SAVE_LOAD.md`](DLIO_MAP_SAVE_LOAD.md) § Viewing the saved map).
 
 ---
 
@@ -252,11 +256,16 @@ stop the teleop nodes: `docker exec localization pkill -f real_teleop`.
 
 ## Phase 8 — Mapping & (future) map-based localization
 
-20. 🤖 Joystick the robot along a full route (close a loop if possible), then
-    `save_pcd` the accumulated map (same service as Phase 3 step 9):
+20. 🤖 Joystick the robot along a full route, then `save_pcd` the accumulated map.
+    The **real** stack runs on `ROS_DOMAIN_ID=42` (set by
+    `real_localization.launch.py`), so the saving shell must join that domain or
+    `/save_pcd` is invisible and the call hangs on `waiting for service`:
     ```bash
+    export ROS_DOMAIN_ID=42                 # real stack domain
+    ros2 daemon stop && ros2 daemon start   # drop any stale domain-0 CLI daemon
+    ros2 service list | grep save_pcd       # sanity: /save_pcd must appear
     ros2 service call /save_pcd direct_lidar_inertial_odometry/srv/SavePCD \
-      "{leaf_size: 0.2, save_path: '/ws/maps/'}"
+      "{leaf_size: 0.05, save_path: '/ws/maps/'}"
     ```
     Watch `/dlio/map_node/map` and `/local_voxel_map/*` grow coherently in RViz
     as you drive.

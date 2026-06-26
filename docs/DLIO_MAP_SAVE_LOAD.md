@@ -24,17 +24,27 @@ that cloud at the request `leaf_size` and writes it
 - **Fixed filename:** always `dlio_map.pcd` inside the directory you pass.
   `save_path: '/ws/maps'` → `/ws/maps/dlio_map.pcd`.
 - `leaf_size` is an independent downsample of the *saved* file (not
-  `map/sparse/leafSize`). `0.1–0.2` is typical; smaller = bigger file/more detail.
+  `map/sparse/leafSize`). `0.05–0.2` is typical (`0.05` dense, `0.2` light);
+  smaller = bigger file/more detail.
 
 ### Procedure
 
-Run **inside the same container** where `dlio_map_node` runs, with the **same DDS
-env** (RMW / `ROS_DOMAIN_ID`):
+Run **inside the same container** where `dlio_map_node` runs, and **adopt the same
+DDS domain as the launched stack** first — otherwise the service is invisible and
+the call hangs on `waiting for service to become available`. The stack's domain is
+**not** the default: `real_localization.launch.py` puts the whole **real** stack on
+`ROS_DOMAIN_ID=42`; the **sim** launches (`sim_localization`, `dlio_debug`) run on
+the default `0`.
 
 ```bash
-mkdir -p /ws/maps        # make the maps dir if not already present
+export ROS_DOMAIN_ID=42                  # REAL stack domain (sim: leave unset / 0)
+ros2 daemon stop && ros2 daemon start    # drop any stale wrong-domain CLI daemon
+
+mkdir -p /ws/maps                        # make the maps dir if not already present
+ros2 service list | grep save_pcd        # sanity: /save_pcd must appear first
+
 ros2 service call /save_pcd direct_lidar_inertial_odometry/srv/SavePCD \
-  "{leaf_size: 0.2, save_path: '/ws/maps'}"
+  "{leaf_size: 0.05, save_path: '/ws/maps'}"
 ```
 
 Confirm: the `dlio_map_node` console prints `Saving map to /ws/maps/dlio_map.pcd ... done`,
@@ -68,6 +78,52 @@ and the service returns `success: true`. Then `ls -la /ws/maps/`.
 `localization` service mounts `../ros2_ws:/ws`
 ([`docker-compose.yml`](../docker/docker-compose.yml)), so `/ws/maps/dlio_map.pcd`
 appears on the host at `Navigation/ros2_ws/maps/dlio_map.pcd` and survives.
+
+---
+
+## Viewing the saved map
+
+The PCD is **not** a live topic — RViz cannot open a file directly. Publish it as a
+`PointCloud2`, then add that topic. Run the publisher on the **same `ROS_DOMAIN_ID`
+as the RViz you want it to show up in** (the real stack's RViz is on domain 42).
+
+### In RViz
+
+```bash
+export ROS_DOMAIN_ID=42                  # match the target RViz (sim: unset / 0)
+ros2 daemon stop && ros2 daemon start    # drop any stale wrong-domain CLI daemon
+
+# publishes /cloud_pcd in frame `map`, once per second:
+ros2 run pcl_ros pcd_to_pointcloud --ros-args \
+  -p file_name:=/ws/maps/dlio_map.pcd \
+  -p tf_frame:=map \
+  -p publishing_period_ms:=1000
+```
+
+In RViz: set **Fixed Frame = `map`**, then **Add → By topic → `/cloud_pcd →
+PointCloud2`** (re-open the dialog if it was already up — the topic list is a
+one-time snapshot, not live). Set the display **Style: Flat Squares**,
+**Size: ~0.05**, **Color Transformer: Intensity** (or AxisColor on Z) — the default
+1-px points on the dark background are easy to miss. No TF is needed: the cloud's
+own frame *is* the fixed frame, so the `No tf data` status is harmless.
+
+> If `/cloud_pcd` never appears in the list, it's the usual domain split — the
+> publisher and RViz are on different `ROS_DOMAIN_ID`s. Confirm with
+> `ros2 topic list | grep cloud_pcd` in the **RViz** terminal.
+
+### Without ROS (quick check)
+
+```bash
+pcl_viewer /ws/maps/dlio_map.pcd         # in-container; press 5 = color by intensity
+```
+
+On the host the file lives at `Navigation/ros2_ws/maps/dlio_map.pcd` — open it with
+**CloudCompare** (best for inspecting/measuring) or **Open3D**:
+
+```python
+import open3d as o3d
+o3d.visualization.draw_geometries([o3d.io.read_point_cloud("ros2_ws/maps/dlio_map.pcd")])
+```
 
 ---
 
