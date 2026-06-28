@@ -49,7 +49,7 @@ flowchart TB
       AMO["RoboJuDo AMO gait<br/>(vx,vy,yaw via WS :8766)"]
     end
 
-    ORCH -->|navigate_to(x,y,θ)| GOAL --> PLAN
+    ORCH -->|"navigate_to(x,y,θ)"| GOAL --> PLAN
     DLIO --> PLAN
     OBST --> PLAN
     PLAN -->|velocity_target| AMO
