@@ -103,6 +103,17 @@ class AStarNode(Node):
         self.declare_parameter('goal_y',                5.0)
         self.declare_parameter('goal_z',                0.0)
         self.declare_parameter('wait_for_goal',       False)
+        # ── Global-path following (global+local architecture) ────────────────
+        # When a global planner publishes a long route on global_path_topic, the
+        # local A* aims at a CARROT along that route (global_carrot_dist ahead of
+        # the robot's projection) instead of beelining to the global goal — so
+        # the robot follows the global detour around clutter. Falls back to the
+        # direct global goal when no fresh global path is available, so the local
+        # planner still works standalone (global planner off / not yet running).
+        self.declare_parameter('follow_global_path',      True)
+        self.declare_parameter('global_path_topic',       '/global_path')
+        self.declare_parameter('global_carrot_dist',      4.0)
+        self.declare_parameter('global_path_max_age_sec', 3.0)
         self.declare_parameter('grid_reso',             0.25)
         self.declare_parameter('grid_half_width',       5.0)
         self.declare_parameter('grid_std',              0.4)
@@ -336,6 +347,19 @@ class AStarNode(Node):
         self.get_logger().info(f'pose source: {odom_topic} (Odometry → PoseStamped)')
         self.create_subscription(PoseStamped, '/global_goal',          self._goal_cb,         10)
 
+        # Global-path following (carrot). Off-able; falls back to direct goal.
+        self._follow_global_path = bool(self.get_parameter('follow_global_path').value)
+        self._global_carrot_dist = float(self.get_parameter('global_carrot_dist').value)
+        self._global_path_max_age = float(self.get_parameter('global_path_max_age_sec').value)
+        self._global_path: np.ndarray | None = None     # (M, 2) world xy
+        self._global_path_t: float = 0.0
+        if self._follow_global_path:
+            gp_topic = str(self.get_parameter('global_path_topic').value)
+            self.create_subscription(Path, gp_topic, self._global_path_cb, 10)
+            self.get_logger().info(f'global-path following: enabled  topic={gp_topic}')
+        else:
+            self.get_logger().info('global-path following: disabled (direct goal)')
+
         external = self._costmap_backend == 'external_grid'
         if external:
             # Plan on a pre-computed cost grid; the Gaussian live-cloud,
@@ -443,6 +467,43 @@ class AStarNode(Node):
     def _pose_cb(self, msg: PoseStamped):
         self._pose = msg
         self._pose_frame = msg.header.frame_id or 'odom'
+
+    def _global_path_cb(self, msg: Path):
+        """Cache the global planner's route (world xy) for carrot following."""
+        if msg.poses:
+            self._global_path = np.array(
+                [(p.pose.position.x, p.pose.position.y) for p in msg.poses], dtype=float)
+            self._global_path_t = self.get_clock().now().nanoseconds * 1e-9
+        else:
+            self._global_path = None
+
+    def _carrot_target(self, drone_xy: np.ndarray) -> np.ndarray:
+        """A* target: a carrot along the fresh global path, else the global goal.
+
+        Projects the robot onto the global path, walks global_carrot_dist further
+        along it, and returns that point — so the local A* heads along the global
+        route. Returns the direct global goal when no fresh global path exists, so
+        the local planner still works standalone.
+        """
+        if not self._follow_global_path or self._global_path is None or len(self._global_path) < 2:
+            return self._goal[:2]
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self._global_path_t > self._global_path_max_age:
+            return self._goal[:2]   # stale route → fall back to direct goal
+
+        gp = self._global_path
+        # Closest point on the path, then advance global_carrot_dist along it.
+        i0 = int(np.argmin(np.linalg.norm(gp - drone_xy, axis=1)))
+        acc = 0.0
+        carrot = gp[-1]
+        for i in range(i0, len(gp) - 1):
+            seg = float(np.linalg.norm(gp[i + 1] - gp[i]))
+            if acc + seg >= self._global_carrot_dist:
+                t = (self._global_carrot_dist - acc) / (seg + 1e-9)
+                carrot = gp[i] + t * (gp[i + 1] - gp[i])
+                break
+            acc += seg
+        return np.asarray(carrot, dtype=float)
 
     def _goal_cb(self, msg: PoseStamped):
         new_goal = np.array([
@@ -848,10 +909,12 @@ class AStarNode(Node):
         stamp = self.get_clock().now().to_msg()
 
         # === ONLINE REPLANNING: Run A* from CURRENT robot position ===
-        # Plan directly to the current global goal; do not route through
-        # nav-graph waypoints, so a previous explored graph node cannot block
-        # or pull the robot backward when a new goal is sent.
-        path = self._planner.plan(self._grid_map, drone_xy, self._goal[:2])
+        # Aim at a CARROT along the global route when one is available (so the
+        # robot follows the global detour around clutter), otherwise straight at
+        # the global goal. Either way A* plans on the LIVE local costmap, so
+        # precise reactive avoidance is unchanged.
+        target_xy = self._carrot_target(drone_xy)
+        path = self._planner.plan(self._grid_map, drone_xy, target_xy)
 
         if path:
             # Publish path

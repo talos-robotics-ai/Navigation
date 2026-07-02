@@ -43,7 +43,13 @@ set +u
 source install/setup.bash
 set -u
 
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"
+# The launch files force ROS_DOMAIN_ID=42 for their nodes, but the estop keyboard
+# helper + the bag recorder started BELOW run in THIS shell's domain. A container
+# shell often has a stray ROS_DOMAIN_ID=0, which would put the e-stop on the wrong
+# domain (bridge never hears it) and record an empty bag. Empty/0 → force 42.
+if [[ -z "${ROS_DOMAIN_ID:-}" || "${ROS_DOMAIN_ID}" == "0" ]]; then
+    export ROS_DOMAIN_ID=42
+fi
 PLANNER_DELAY="${PLANNER_DELAY:-3}"
 
 # ── Separate logs for localization vs planner ────────────────────────────────
@@ -81,10 +87,14 @@ trap cleanup INT TERM
 # tee's — so cleanup signals the launch directly.
 run_launch() {
     local logfile="$1"; shift
+    # stdin from /dev/null: these run in the BACKGROUND while the foreground
+    # e-stop keyboard node owns the terminal. Without this, `ros2 bag record`
+    # (which reads stdin for its SPACE pause) would steal the s/g/q keystrokes
+    # meant for the e-stop, making the safety stop unreliable.
     if [[ "${LOG_TO_CONSOLE}" == "1" ]]; then
-        "$@" > >(tee -a "${logfile}") 2>&1 &
+        "$@" < /dev/null > >(tee -a "${logfile}") 2>&1 &
     else
-        "$@" > "${logfile}" 2>&1 &
+        "$@" < /dev/null > "${logfile}" 2>&1 &
     fi
     pids+=($!)
 }
@@ -102,12 +112,47 @@ echo ">> [2/2] A*+MPC planner (+ cmd_vel -> AMO WS bridge) ..."
 echo ">>       logs -> ${PLANNER_LOG}"
 run_launch "${PLANNER_LOG}" ros2 launch a_star_mpc_planner planner.launch.py
 
+# ── Auto-record a ROS bag for troubleshooting ────────────────────────────────
+# Every autonomy run captures the nav topics to a timestamped bag (shares TS with
+# the logs) so the run can be replayed / plotted afterwards with
+# scripts/analyze_nav_bag.py. Reuses record_nav_bag.sh (forces domain 42 +
+# preflight-checks that topics are live), backgrounded and tied into cleanup()
+# via run_launch so Ctrl-C / 'q' finalises the bag gracefully.
+#   RECORD_BAG=0   ./autonomy.sh   # disable recording for this run
+#   RECORD_FULL=1  ./autonomy.sh   # also grab obstacle cloud + costmaps (big;
+#                                  #   needed for obstacle-avoidance debugging)
+#   BAG_DIR=/path  ./autonomy.sh   # override the bag root (default ${WS}/nav_bags)
+RECORD_BAG="${RECORD_BAG:-1}"
+RECORD_FULL="${RECORD_FULL:-0}"
+BAG_ROOT="${BAG_DIR:-${WS}/nav_bags}"
+REC_SCRIPT="${WS}/scripts/record_nav_bag.sh"
+BAG_OUT=""
+if [[ "${RECORD_BAG}" == "1" ]]; then
+    if [[ -x "${REC_SCRIPT}" ]]; then
+        BAG_OUT="${BAG_ROOT}/nav_${TS}"
+        BAG_LOG="${LOG_DIR}/rosbag_${TS}.log"
+        ln -sfn "$(basename "${BAG_LOG}")" "${LOG_DIR}/rosbag_latest.log"
+        rec_args=("${BAG_OUT}")
+        [[ "${RECORD_FULL}" == "1" ]] && rec_args+=(--full)
+        echo ">> [rec] recording nav bag -> ${BAG_OUT}  (full=${RECORD_FULL})"
+        echo ">>       rec log -> ${BAG_LOG}"
+        run_launch "${BAG_LOG}" "${REC_SCRIPT}" "${rec_args[@]}"
+        ln -sfn "${BAG_OUT}" "${BAG_ROOT}/nav_latest"   # stable handle for analysis
+    else
+        echo ">> [rec] WARNING: ${REC_SCRIPT} not executable — NOT recording." >&2
+    fi
+fi
+
 echo ""
 echo ">> both launches running. Read their logs SEPARATELY (each in its own terminal):"
 echo ">>     tail -f ${LOG_DIR}/localization_latest.log"
 echo ">>     tail -f ${LOG_DIR}/planner_latest.log"
 echo ">> Start the gait:  AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh"
 echo ">> then set a goal in RViz (2D Goal Pose -> /global_goal)."
+if [[ -n "${BAG_OUT}" ]]; then
+    echo ">> recording -> ${BAG_OUT}"
+    echo ">>   analyse after:  python3 ${WS}/scripts/analyze_nav_bag.py ${BAG_ROOT}/nav_latest --no-show"
+fi
 
 # ── Foreground keyboard e-stop ───────────────────────────────────────────────
 # This owns the terminal's stdin (the two launches stream to logfiles), so you

@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     net-tools \
     tcpdump \
     python3-pip \
+    python3-numpy \
+    python3-scipy \
     python3-colcon-common-extensions \
     python3-rosdep \
     python3-vcstool \
@@ -133,6 +135,24 @@ RUN echo 'source /opt/ros/humble/setup.bash' >> /root/.bashrc && \
     echo '[ -f /ws/install/setup.bash ] && source /ws/install/setup.bash' >> /root/.bashrc && \
     echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> /root/.bashrc && \
     echo 'export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}' >> /root/.bashrc
+
+# ----------------------------------------------------------------------
+# Unitree Python SDK — required for gait:=unitree (the native factory walking
+# policy via cmd_vel_to_unitree_loco_node / unitree_gait_test). NOT needed for
+# the default AMO gait. The Python cyclonedds binding builds against the ROS-
+# provided CycloneDDS (its cmake config lives under /opt/ros/humble), so
+# CYCLONEDDS_HOME points there. If this step ever fails, the native gait is
+# simply unavailable — comment it out to fall back to an AMO-only image.
+# ----------------------------------------------------------------------
+RUN CYCLONEDDS_HOME=/opt/ros/humble pip3 install --no-cache-dir \
+        cyclonedds \
+        git+https://github.com/unitreerobotics/unitree_sdk2_python.git && \
+    # Ubuntu 22.04 / ROS Humble ships scipy 1.8.x, whose compiled extensions
+    # require NumPy 1.x. Some pip dependencies can pull NumPy 2.x into
+    # /usr/local, shadowing apt's NumPy and breaking scipy.ndimage at runtime.
+    pip3 install --no-cache-dir --force-reinstall \
+        'numpy<1.25' \
+        'opencv-python<4.9'
 
 WORKDIR /ws
 

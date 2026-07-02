@@ -93,13 +93,20 @@ obstacle) that A\* searches. Different stages, not competing maps — and inflat
 happens exactly **once**, here. (`g1_local_map`'s `~/costmap` is a raw,
 un-inflated 2D layer for visualization and is not consumed by the planner.)
 
-### Optional DLIO global-map fusion (off by default)
+### DLIO global-map fusion (off by default)
 `enable_dlio_map:=true` fuses DLIO's keyframe global map (`/dlio/map_node/map`)
 as static context for structure that has left the live FOV. That map is **not**
 ground-removed, so the fusion path **strips its floor** with the same per-cell
 segmentation (robust to the sensor-origin frame) and caps points above the
 sensor (`dlio_map_z_above`) before adding them as obstacles. Off by default:
 `g1_local_map` already provides a dense ground-removed cloud.
+
+> ⚠️ **Do not enable it just for long-horizon "return-home" memory.** It was
+> tried for that and regressed normal navigation: DLIO's global accumulated
+> cloud carries odom drift and imperfect ground removal, so fusing it raw into
+> the *local* costmap injects phantom/ghost obstacles that grow over the run and
+> make A\* detour around free space. Long-horizon memory belongs in a dedicated
+> **global planner on a drift-corrected global costmap**, not this raw fusion.
 
 ---
 
@@ -202,6 +209,34 @@ standalone with `ros2 run g1_sim_bridge estop_keyboard_node`.
 
 ---
 
+## 4b. Controller mode — time-optimal MPCC
+
+`mpc_mode` selects the MPC tracker:
+
+- **`tracking`** — the reference-tracking MPC (`mpc_tracker.py`): follows the A\*
+  path at a fixed cruise `mpc_v_ref`. Stable and proven, but not time-optimal
+  (it leaves speed budget unused).
+- **`contouring`** — **MPCC** (`mpcc_tracker.py`): parameterises the path by arc
+  length θ and **maximises progress** (`−q·θ`) subject to the velocity limits and
+  the obstacle barrier, so the robot reaches the goal in **minimum time** while
+  staying on the collision-free A\* path. State gains a progress coordinate
+  (`[px,py,yaw,vx,vy,wz,θ]`) and control a progress speed (`[vx,vy,wz,vθ]`); the
+  local path is fit with a degree-`mpcc_poly_degree` polynomial so `p(θ)` and its
+  tangent are smooth in the NLP. Holonomic `vy` (crab-walk) is allowed.
+
+MPCC weights: `mpcc_vtheta_max` (max progress speed), `mpcc_w_contour` (stay on
+path), `mpcc_w_lag` (θ tracks the robot), `mpcc_q_progress` /
+`mpcc_q_progress_terminal` (push speed / push to goal), `mpcc_Q_yaw_align` (soft
+face-tangent; low → crab freely), `mpcc_poly_degree`. The MPCC NLP is heavier
+(7 states / 4 controls) — watch `solve_ms` in `/mpc/diagnostics` (≈26 ms at
+N=50 in testing); reduce `mpc_N` or `mpcc_poly_degree` if it approaches the
+`1/mpc_rate_hz` budget. The result's first six state columns match the tracking
+MPC, so `cmd_vel` and the predicted-path output are identical regardless of mode.
+Switch back instantly with `mpc_mode: tracking` if anything misbehaves on-robot.
+
+Full formulation (state/dynamics, contour/lag/progress cost, constraints, code
+map, tuning): **[MPCC_CONTOURING_MPC.md](MPCC_CONTOURING_MPC.md)**.
+
 ## 5. Tuning
 
 All parameters live in
@@ -217,7 +252,7 @@ heavily commented. The knobs you are most likely to touch:
 | `mpc_vx_max` / `mpc_vy_max` / `mpc_omega_max` | `0.45` / `0.05` / `0.80` | velocity envelope handed to AMO (keep within what the gait tracks stably) |
 | `mpc_obs_r` | `0.55` | robot half-width + margin for the MPC obstacle barrier |
 | `mpc_security_threshold` | `0.25` | occupancy at the robot that triggers the escape behaviour |
-| `enable_dlio_map` | `false` | fuse DLIO's global map as static context |
+| `enable_dlio_map` | `false` | fuse DLIO's global map as static context (see ⚠️ above) |
 
 **Dependencies:** `a_star_node`/`mpc_node` need `numpy`, `scipy`, and `casadi` in
 the ROS 2 / `localization` image. Build the workspace in-container (`build_ws`).

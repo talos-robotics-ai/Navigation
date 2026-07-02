@@ -59,6 +59,7 @@ from std_msgs.msg import Float64MultiArray, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from a_star_mpc_planner.mpc_tracker import MPCConfig, MPCTracker
+from a_star_mpc_planner.mpcc_tracker import MPCCConfig, MPCCTracker
 
 # CubicSpline for path smoothing (fix #5); graceful fallback if unavailable
 try:
@@ -193,12 +194,29 @@ class MPCNode(Node):
         self.declare_parameter('goal_heading_kp',            1.0)
         self.declare_parameter('goal_heading_min_omega',     0.20)
         self.declare_parameter('goal_heading_max_omega',     0.40)
+        # ── Final-approach heading blend (issue #2: no turn-around at goal) ──
+        # During the last goal_align_start_dist metres of the approach, steer yaw
+        # progressively toward the GOAL heading (not just the path tangent) so the
+        # robot arrives already aligned and does not spin in place at the end.
+        # 0.0 disables the blend (revert to arrive-then-rotate).
+        self.declare_parameter('goal_align_start_dist',      1.2)
+        # Arrive REGARDLESS of heading: once within goal_reached_radius in x/y,
+        # STOP — do not rotate in place to the goal yaw, and skip the final-
+        # approach yaw blend. Set true to restore arrive-then-align-heading.
+        self.declare_parameter('require_goal_heading',       False)
 
         # ── Fail-safe watchdog (issue #5; critical for on-robot testing) ─────
         # If pose or path goes stale the MPC commands ZERO velocity instead of
         # silently returning and letting the robot coast on the last command.
         self.declare_parameter('odom_timeout_sec',           0.5)
         self.declare_parameter('path_timeout_sec',           2.0)
+
+        # ── Soft-hold on transient solve failure (issue #1: stop/go) ─────────
+        # On a failed MPCC solve, coast on a decayed copy of the last good
+        # command for this many solve cycles before commanding zero, so a single
+        # numerical miss no longer produces a full-stop stutter.
+        self.declare_parameter('mpc_soft_hold_cycles', 3)
+        self.declare_parameter('mpc_soft_hold_decay',  0.6)
 
         # ── Dynamic-obstacle clustering (issue #2 + prediction correctness) ──
         # Obstacle points are clustered (grid connected-components), centroids
@@ -208,37 +226,105 @@ class MPCNode(Node):
         self.declare_parameter('obs_cluster_cell',           0.30)
         self.declare_parameter('obs_static_speed',           0.15)   # m/s static cutoff
         self.declare_parameter('obs_max_track_speed',        2.5)    # reject faster matches
+        # Temporal-consistency gate: a cluster is only treated as DYNAMIC (and
+        # extrapolated) once its estimated velocity agrees in direction with the
+        # previous frame's (cos >= this). Kills phantom velocities from a static
+        # wall whose centroid drifts as its observed extent changes frame-to-frame.
+        self.declare_parameter('obs_dir_consistency',        0.5)    # cos(60°)
         # RViz velocity-vector arrows: length = speed * this many seconds.
         self.declare_parameter('mpc_vel_arrow_scale',        1.0)
 
-        # ── Build MPCConfig and tracker ───────────────────────────────
-        cfg = MPCConfig(
-            N             = int(self.get_parameter('mpc_N').value),
-            dt            = float(self.get_parameter('mpc_dt').value),
-            tau_v         = float(self.get_parameter('mpc_tau_v').value),
-            tau_w         = float(self.get_parameter('mpc_tau_w').value),
-            vx_max        = float(self.get_parameter('mpc_vx_max').value),
-            vy_max        = float(self.get_parameter('mpc_vy_max').value),
-            omega_max     = float(self.get_parameter('mpc_omega_max').value),
-            v_ref         = float(self.get_parameter('mpc_v_ref').value),
-            Q_x           = float(self.get_parameter('mpc_Q_x').value),
-            Q_y           = float(self.get_parameter('mpc_Q_y').value),
-            Q_yaw         = float(self.get_parameter('mpc_Q_yaw').value),
-            Q_terminal    = float(self.get_parameter('mpc_Q_terminal').value),
-            R_vx          = float(self.get_parameter('mpc_R_vx').value),
-            R_vy          = float(self.get_parameter('mpc_R_vy').value),
-            R_omega       = float(self.get_parameter('mpc_R_omega').value),
-            R_jerk        = float(self.get_parameter('mpc_R_jerk').value),
-            W_obs_sigmoid       = float(self.get_parameter('mpc_W_obs_sigmoid').value),
-            obs_alpha           = float(self.get_parameter('mpc_obs_alpha').value),
-            obs_r               = float(self.get_parameter('mpc_obs_r').value),
-            max_obs_constraints = int(self.get_parameter('mpc_max_obs_constraints').value),
-            obs_check_radius    = float(self.get_parameter('mpc_obs_check_radius').value),
-            max_iter      = int(self.get_parameter('mpc_max_iter').value),
-            warm_start    = bool(self.get_parameter('mpc_warm_start').value),
-        )
-        self._tracker = MPCTracker(config=cfg)
-        self._cfg = cfg
+        # ── Controller mode + MPCC (contouring) weights ──────────────────────
+        # 'tracking'   : reference-tracking MPC at fixed v_ref (proven, stable).
+        # 'contouring' : MPCC — maximises arc-length progress along the A* path
+        #                subject to velocity limits + the obstacle barrier, i.e.
+        #                reaches the goal in MINIMUM time while staying on the
+        #                (collision-free) path. Holonomic vy is supported.
+        self.declare_parameter('mpc_mode',               'tracking')
+        self.declare_parameter('mpcc_vtheta_max',         0.55)   # max progress speed
+        self.declare_parameter('mpcc_w_contour',          300.0)  # stay on path (lateral)
+        self.declare_parameter('mpcc_w_lag',              60.0)   # θ tracks the robot
+        self.declare_parameter('mpcc_q_progress',         2.0)    # per-step speed reward
+        self.declare_parameter('mpcc_q_progress_terminal', 60.0)  # push θ_N to goal
+        self.declare_parameter('mpcc_Q_yaw_align',        40.0)   # soft face-tangent
+        # Terminal GOAL-heading weight: max weight on aligning the MPCC horizon-end
+        # yaw to goal_yaw, ramped in near the goal. Active only when
+        # require_goal_heading=true (else 0 → tangent alone owns yaw).
+        self.declare_parameter('mpcc_Q_goal_yaw',         40.0)
+        self.declare_parameter('mpcc_R_vtheta',           0.1)
+        self.declare_parameter('mpcc_poly_degree',        3)
+
+        # ── Build the configured tracker ─────────────────────────────────────
+        self._mpc_mode = str(self.get_parameter('mpc_mode').value).strip().lower()
+        if self._mpc_mode not in ('tracking', 'contouring'):
+            self.get_logger().warning(
+                f"unknown mpc_mode={self._mpc_mode!r}; falling back to 'tracking'")
+            self._mpc_mode = 'tracking'
+
+        if self._mpc_mode == 'contouring':
+            ccfg = MPCCConfig(
+                N             = int(self.get_parameter('mpc_N').value),
+                dt            = float(self.get_parameter('mpc_dt').value),
+                tau_v         = float(self.get_parameter('mpc_tau_v').value),
+                tau_w         = float(self.get_parameter('mpc_tau_w').value),
+                vx_max        = float(self.get_parameter('mpc_vx_max').value),
+                vy_max        = float(self.get_parameter('mpc_vy_max').value),
+                omega_max     = float(self.get_parameter('mpc_omega_max').value),
+                vtheta_max    = float(self.get_parameter('mpcc_vtheta_max').value),
+                w_contour     = float(self.get_parameter('mpcc_w_contour').value),
+                w_lag         = float(self.get_parameter('mpcc_w_lag').value),
+                q_progress    = float(self.get_parameter('mpcc_q_progress').value),
+                q_progress_terminal = float(self.get_parameter('mpcc_q_progress_terminal').value),
+                Q_yaw_align   = float(self.get_parameter('mpcc_Q_yaw_align').value),
+                R_vx          = float(self.get_parameter('mpc_R_vx').value),
+                R_vy          = float(self.get_parameter('mpc_R_vy').value),
+                R_omega       = float(self.get_parameter('mpc_R_omega').value),
+                R_vtheta      = float(self.get_parameter('mpcc_R_vtheta').value),
+                R_jerk        = float(self.get_parameter('mpc_R_jerk').value),
+                W_obs_sigmoid = float(self.get_parameter('mpc_W_obs_sigmoid').value),
+                obs_alpha     = float(self.get_parameter('mpc_obs_alpha').value),
+                obs_r         = float(self.get_parameter('mpc_obs_r').value),
+                max_obs_constraints = int(self.get_parameter('mpc_max_obs_constraints').value),
+                obs_check_radius    = float(self.get_parameter('mpc_obs_check_radius').value),
+                poly_degree   = int(self.get_parameter('mpcc_poly_degree').value),
+                max_iter      = int(self.get_parameter('mpc_max_iter').value),
+                warm_start    = bool(self.get_parameter('mpc_warm_start').value),
+            )
+            self._tracker = MPCCTracker(config=ccfg)
+            self._cfg = ccfg
+            self.get_logger().info(
+                f'MPC mode: CONTOURING (MPCC) — time-optimal | '
+                f'vtheta_max={ccfg.vtheta_max} w_contour={ccfg.w_contour} '
+                f'q_prog_T={ccfg.q_progress_terminal}')
+        else:
+            cfg = MPCConfig(
+                N             = int(self.get_parameter('mpc_N').value),
+                dt            = float(self.get_parameter('mpc_dt').value),
+                tau_v         = float(self.get_parameter('mpc_tau_v').value),
+                tau_w         = float(self.get_parameter('mpc_tau_w').value),
+                vx_max        = float(self.get_parameter('mpc_vx_max').value),
+                vy_max        = float(self.get_parameter('mpc_vy_max').value),
+                omega_max     = float(self.get_parameter('mpc_omega_max').value),
+                v_ref         = float(self.get_parameter('mpc_v_ref').value),
+                Q_x           = float(self.get_parameter('mpc_Q_x').value),
+                Q_y           = float(self.get_parameter('mpc_Q_y').value),
+                Q_yaw         = float(self.get_parameter('mpc_Q_yaw').value),
+                Q_terminal    = float(self.get_parameter('mpc_Q_terminal').value),
+                R_vx          = float(self.get_parameter('mpc_R_vx').value),
+                R_vy          = float(self.get_parameter('mpc_R_vy').value),
+                R_omega       = float(self.get_parameter('mpc_R_omega').value),
+                R_jerk        = float(self.get_parameter('mpc_R_jerk').value),
+                W_obs_sigmoid       = float(self.get_parameter('mpc_W_obs_sigmoid').value),
+                obs_alpha           = float(self.get_parameter('mpc_obs_alpha').value),
+                obs_r               = float(self.get_parameter('mpc_obs_r').value),
+                max_obs_constraints = int(self.get_parameter('mpc_max_obs_constraints').value),
+                obs_check_radius    = float(self.get_parameter('mpc_obs_check_radius').value),
+                max_iter      = int(self.get_parameter('mpc_max_iter').value),
+                warm_start    = bool(self.get_parameter('mpc_warm_start').value),
+            )
+            self._tracker = MPCTracker(config=cfg)
+            self._cfg = cfg
+            self.get_logger().info('MPC mode: TRACKING (reference @ v_ref)')
 
         # ── Security protocol (grid-free, debounced) ──────────────────
         self._security_enable        = bool(self.get_parameter('mpc_security_enable').value)
@@ -279,9 +365,11 @@ class MPCNode(Node):
         self._obs_cluster_cell = float(self.get_parameter('obs_cluster_cell').value)
         self._obs_static_speed = float(self.get_parameter('obs_static_speed').value)
         self._obs_max_track_speed = float(self.get_parameter('obs_max_track_speed').value)
+        self._obs_dir_consistency = float(self.get_parameter('obs_dir_consistency').value)
         # Previous-frame cluster centroids for centroid-level tracking (few
         # clusters, not thousands of points → cheap and free of phantom motion).
         self._prev_cluster_centroids: Optional[np.ndarray] = None   # (C, 2)
+        self._prev_cluster_vel: Optional[np.ndarray] = None         # (C, 2) raw est
         self._prev_cluster_time: Optional[float] = None
         # Latest tracked clusters, exposed for RViz velocity-vector markers.
         # _track_vel is zero for clusters classified static, non-zero for dynamic.
@@ -298,6 +386,9 @@ class MPCNode(Node):
         self._goal_heading_kp = float(self.get_parameter('goal_heading_kp').value)
         self._goal_heading_min_omega = float(self.get_parameter('goal_heading_min_omega').value)
         self._goal_heading_max_omega = float(self.get_parameter('goal_heading_max_omega').value)
+        self._goal_align_start_dist = float(self.get_parameter('goal_align_start_dist').value)
+        self._require_goal_heading = bool(self.get_parameter('require_goal_heading').value)
+        self._mpcc_q_goal_yaw = float(self.get_parameter('mpcc_Q_goal_yaw').value)
         self._goal_xy: Optional[np.ndarray] = None   # global goal (from /global_goal)
         self._goal_yaw: Optional[float] = None
         # Navigation state: IDLE → NAVIGATING → ALIGNING → GOAL_REACHED; STOPPED on fail-safe.
@@ -309,14 +400,21 @@ class MPCNode(Node):
         self._last_odom_sec: Optional[float] = None
         self._last_path_sec: Optional[float] = None
 
+        # ── Soft-hold state (issue #1) ────────────────────────────────
+        self._soft_hold_cycles = int(self.get_parameter('mpc_soft_hold_cycles').value)
+        self._soft_hold_decay  = float(self.get_parameter('mpc_soft_hold_decay').value)
+        self._last_good_cmd    = np.zeros(3, dtype=float)   # [vx, vy, wz]
+        self._soft_hold_count  = 0
+
         # ── Adaptive velocity limits (#9) ─────────────────────────────
+        # Use self._cfg so this works for either tracker (MPCConfig / MPCCConfig).
         self._adaptive_enabled  = bool(self.get_parameter('adaptive_vel_limits').value)
-        self._cfg_vx_max        = cfg.vx_max    # configured ceiling
-        self._cfg_vy_max        = cfg.vy_max
-        self._cfg_omega_max     = cfg.omega_max
-        self._adaptive_vx_max   = cfg.vx_max    # current effective limit
-        self._adaptive_vy_max   = cfg.vy_max
-        self._adaptive_omega_max = cfg.omega_max
+        self._cfg_vx_max        = self._cfg.vx_max    # configured ceiling
+        self._cfg_vy_max        = self._cfg.vy_max
+        self._cfg_omega_max     = self._cfg.omega_max
+        self._adaptive_vx_max   = self._cfg.vx_max    # current effective limit
+        self._adaptive_vy_max   = self._cfg.vy_max
+        self._adaptive_omega_max = self._cfg.omega_max
         self._recent_solves: deque = deque(maxlen=20)
 
         # ── Subscriptions state ───────────────────────────────────────
@@ -690,18 +788,32 @@ class MPCNode(Node):
     ) -> np.ndarray:
         """Predict obstacle positions by tracking CLUSTER centroids, not points.
 
-        Pipeline: cluster the cloud → centroid per cluster → match centroids to
-        the previous frame's centroids (nearest, plausible jump) → per-cluster
-        velocity. Only clusters whose speed exceeds obs_static_speed are treated
-        as DYNAMIC and extrapolated forward by predict_sec; static structure is
-        left exactly where it is (no phantom motion — the old code's central
-        flaw: it shifted the WHOLE voxel cloud by per-point jitter velocities).
-        Each point is displaced by its own cluster's velocity, so extended
-        obstacles keep full boundary coverage for the MPC barrier.
+        FRAME NOTE (why the robot velocity is NOT subtracted): the obstacle cloud
+        (/local_voxel_map/obstacles) is in the world-fixed ODOM frame, so a static
+        obstacle keeps a constant (x, y) no matter how the robot moves. Its
+        centroid velocity, computed here as (centroid_now − centroid_prev)/dt, is
+        therefore ≈0 already. Subtracting the robot's own velocity would be wrong
+        in this frame — it would give every static obstacle a phantom −v_robot.
+        (That subtraction is only needed when obstacles are expressed in the
+        moving sensor/body frame, which these are not.)
+
+        Pipeline: cluster the cloud → centroid per cluster → match to the previous
+        frame's centroids (nearest, plausible jump) → per-cluster velocity. A
+        cluster is extrapolated forward by predict_sec ONLY if its speed is in
+        [obs_static_speed, obs_max_track_speed] AND its velocity direction is
+        consistent with last frame's (cos ≥ obs_dir_consistency). That temporal
+        gate is the fix for the one remaining phantom-motion source the static
+        threshold alone missed: a STATIC wall whose observed extent grows/shrinks
+        as it enters/leaves the FOV, sliding its centroid at up to the robot's
+        speed for a frame or two — incoherent drift that never confirms, so it is
+        left at rest. Static structure thus stays put; each point of a confirmed
+        moving cluster is displaced by that cluster's velocity so extended
+        obstacles keep full boundary coverage for the barrier.
         """
         predicted = obs_2d.copy()
         if len(obs_2d) == 0:
             self._prev_cluster_centroids = None
+            self._prev_cluster_vel = None
             self._prev_cluster_time = current_time
             self._track_centroids = None
             self._track_vel = None
@@ -712,13 +824,15 @@ class MPCNode(Node):
         for c in range(n_clusters):
             centroids[c] = obs_2d[labels == c].mean(axis=0)
 
-        cluster_vel = np.zeros((n_clusters, 2), dtype=float)
+        cluster_vel = np.zeros((n_clusters, 2), dtype=float)      # CONFIRMED dynamic
+        cluster_vel_raw = np.zeros((n_clusters, 2), dtype=float)  # this-frame estimate
         if (self._prev_cluster_centroids is not None
                 and self._prev_cluster_time is not None
                 and len(self._prev_cluster_centroids) > 0):
             frame_dt = current_time - self._prev_cluster_time
             if 0.05 < frame_dt < 1.0:
                 prev = self._prev_cluster_centroids
+                prev_vel = self._prev_cluster_vel
                 for c in range(n_clusters):
                     d = np.linalg.norm(prev - centroids[c], axis=1)
                     j = int(np.argmin(d))
@@ -727,8 +841,15 @@ class MPCNode(Node):
                         vel = (centroids[c] - prev[j]) / frame_dt
                         speed = float(np.linalg.norm(vel))
                         if self._obs_static_speed <= speed <= self._obs_max_track_speed:
-                            cluster_vel[c] = vel   # DYNAMIC → extrapolate
-                        # else static (jitter) / implausible → leave at rest
+                            cluster_vel_raw[c] = vel   # candidate this frame
+                            # Confirm only if the matched cluster was ALSO moving
+                            # coherently last frame (drift is directionally random).
+                            pv = prev_vel[j] if prev_vel is not None else np.zeros(2)
+                            pspeed = float(np.linalg.norm(pv))
+                            if pspeed >= self._obs_static_speed:
+                                cosang = float(np.dot(vel, pv) / (speed * pspeed + 1e-9))
+                                if cosang >= self._obs_dir_consistency:
+                                    cluster_vel[c] = vel   # CONFIRMED → extrapolate
 
         moving = np.linalg.norm(cluster_vel, axis=1) > 0.0
         if moving.any():
@@ -737,8 +858,11 @@ class MPCNode(Node):
             predicted[move_mask] = obs_2d[move_mask] + disp[move_mask]
 
         self._prev_cluster_centroids = centroids
+        # Carry the RAW estimate (not just confirmed) so a genuinely moving
+        # obstacle can confirm on the very next frame.
+        self._prev_cluster_vel = cluster_vel_raw
         self._prev_cluster_time = current_time
-        # Expose for RViz velocity-vector markers (zero rows = static clusters).
+        # Expose CONFIRMED-dynamic velocities for RViz arrows (static → zero).
         self._track_centroids = centroids
         self._track_vel = cluster_vel
         return predicted
@@ -1025,7 +1149,7 @@ class MPCNode(Node):
                 yaw_err = 0.0
                 if self._goal_yaw is not None:
                     yaw_err = _wrap_angle(self._goal_yaw - self._yaw)
-                if abs(yaw_err) > self._goal_heading_tol:
+                if self._require_goal_heading and abs(yaw_err) > self._goal_heading_tol:
                     self._set_state('ALIGNING')
                     self._tracker._prev_u = None
                     self._tracker._prev_x = None
@@ -1160,7 +1284,27 @@ class MPCNode(Node):
             self._set_state('NAVIGATING')
 
         # ── Solve MPC ─────────────────────────────────────────────────
-        result = self._tracker.solve(state, mpc_path, obstacle_points_2d=obs_2d)
+        # Terminal goal-heading alignment for the MPCC (issue #2, in-NLP variant):
+        # ramp a weight on yaw_N → goal_yaw as the robot nears the goal so it blends
+        # into the final heading during the approach instead of spinning in place.
+        # Gated by require_goal_heading; contouring mode only. β=0 far away → the
+        # path-tangent term owns yaw in transit.
+        if self._mpc_mode == 'contouring':
+            gy, gy_weight = None, 0.0
+            if (self._require_goal_heading and self._goal_yaw is not None
+                    and self._goal_xy is not None
+                    and self._goal_align_start_dist > self._goal_reached_radius):
+                dist_g = float(np.linalg.norm(robot_xy_now - self._goal_xy))
+                if dist_g < self._goal_align_start_dist:
+                    span = self._goal_align_start_dist - self._goal_reached_radius
+                    beta = float(np.clip(
+                        (self._goal_align_start_dist - dist_g) / max(span, 1e-3), 0.0, 1.0))
+                    gy = float(self._goal_yaw)
+                    gy_weight = beta * self._mpcc_q_goal_yaw
+            result = self._tracker.solve(state, mpc_path, obstacle_points_2d=obs_2d,
+                                         goal_yaw=gy, goal_yaw_weight=gy_weight)
+        else:
+            result = self._tracker.solve(state, mpc_path, obstacle_points_2d=obs_2d)
         result.security_mode = in_inflated
 
         self._solve_count    += 1
@@ -1273,6 +1417,62 @@ class MPCNode(Node):
                 cmd_vel.linear.x  = float(result.u_opt[0, 0])
                 cmd_vel.linear.y  = float(result.u_opt[0, 1])
                 cmd_vel.angular.z = float(result.u_opt[0, 2])
+                # Remember the last GOOD command for the soft-hold below.
+                self._last_good_cmd = np.array(
+                    [cmd_vel.linear.x, cmd_vel.linear.y, cmd_vel.angular.z], dtype=float)
+                self._soft_hold_count = 0
+            else:
+                # ── Soft-hold on a transient solve failure (issue #1: stop/go) ──
+                # A single failed IPOPT solve used to emit a HARD zero here, so an
+                # occasional miss on this heavy MPCC produced the visible stop/go
+                # stutter. Instead, coast on a DECAYED version of the last good
+                # command for up to mpc_soft_hold_cycles solves (≈ a few hundred
+                # ms), then fall through to zero if the solver stays broken. The
+                # security layer + fail-safe watchdog still hard-stop on genuine
+                # danger / stale data, so this only smooths over numerical blips.
+                self._soft_hold_count += 1
+                if self._soft_hold_count <= self._soft_hold_cycles:
+                    self._last_good_cmd = self._last_good_cmd * self._soft_hold_decay
+                    cmd_vel.linear.x  = float(self._last_good_cmd[0])
+                    cmd_vel.linear.y  = float(self._last_good_cmd[1])
+                    cmd_vel.angular.z = float(self._last_good_cmd[2])
+                    self.get_logger().warn(
+                        f'[MPC] solve failed — soft-hold {self._soft_hold_count}/'
+                        f'{self._soft_hold_cycles} cmd=[{cmd_vel.linear.x:+.2f},'
+                        f'{cmd_vel.linear.y:+.2f},{cmd_vel.angular.z:+.2f}]',
+                        throttle_duration_sec=0.5)
+                else:
+                    self._last_good_cmd = np.zeros(3, dtype=float)
+
+            # ── Final-approach heading blend (issue #2) ───────────────
+            # As the robot closes on the goal, progressively steer yaw toward the
+            # GOAL heading instead of the path tangent, so it arrives already
+            # aligned (the G1 crab-walks, so it keeps translating while turning)
+            # rather than reaching the position and then spinning in place. β
+            # ramps 0→1 over [goal_align_start_dist → goal_reached_radius].
+            # TRACKING mode only: in CONTOURING the MPCC owns this via its terminal
+            # goal-yaw term (fed above), so the post-hoc override would double it.
+            if (self._mpc_mode != 'contouring'
+                    and self._require_goal_heading
+                    and self._goal_yaw is not None and self._goal_xy is not None
+                    and self._nav_state == 'NAVIGATING'
+                    and self._goal_align_start_dist > self._goal_reached_radius):
+                dist_g = float(np.linalg.norm(robot_xy_now - self._goal_xy))
+                if dist_g < self._goal_align_start_dist:
+                    span = self._goal_align_start_dist - self._goal_reached_radius
+                    beta = float(np.clip(
+                        (self._goal_align_start_dist - dist_g) / max(span, 1e-3), 0.0, 1.0))
+                    yaw_err = _wrap_angle(self._goal_yaw - self._yaw)
+                    max_omega = max(0.0, min(self._goal_heading_max_omega,
+                                             self._adaptive_omega_max))
+                    align_wz = float(np.clip(self._goal_heading_kp * yaw_err,
+                                             -max_omega, max_omega))
+                    cmd_vel.angular.z = (1.0 - beta) * cmd_vel.angular.z + beta * align_wz
+                    self.get_logger().info(
+                        f'[MPC-APPROACH] dist={dist_g:.2f}m β={beta:.2f} '
+                        f'yaw_err={math.degrees(yaw_err):+.0f}° wz={cmd_vel.angular.z:+.2f}',
+                        throttle_duration_sec=0.5)
+
             self._cmd_vel_pub.publish(cmd_vel)
 
             self.get_logger().info(

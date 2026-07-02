@@ -13,3 +13,4 @@ __pycache__/
 
 # Runtime logs from autonomy.sh (per-launch separated logs)
 ros2_ws/logs/
+ros2_ws/nav_bags/

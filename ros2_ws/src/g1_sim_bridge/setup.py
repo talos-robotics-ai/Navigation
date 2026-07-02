@@ -28,6 +28,9 @@ setup(
             'g1_sim_bridge.isaac_dlio_qos_relay_node:main',
             'imu_rescale_node = g1_sim_bridge.imu_rescale_node:main',
             'cmd_vel_to_amo_node = g1_sim_bridge.cmd_vel_to_amo_node:main',
+            'cmd_vel_to_unitree_loco_node = '
+            'g1_sim_bridge.cmd_vel_to_unitree_loco_node:main',
+            'unitree_gait_test = g1_sim_bridge.unitree_gait_test:main',
             'joy_to_cmdvel_node = g1_sim_bridge.joy_to_cmdvel_node:main',
             'estop_keyboard_node = g1_sim_bridge.estop_keyboard_node:main',
         ],

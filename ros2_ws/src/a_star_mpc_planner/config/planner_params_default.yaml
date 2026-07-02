@@ -37,6 +37,13 @@
     # That map is NOT ground-removed, so the fusion path strips its floor with
     # per-cell segmentation (ground_segment_height) and caps points above the
     # sensor by dlio_map_z_above before adding them as obstacles.
+    # OFF: enabling it (to give A* long-horizon memory of the scene) was tried,
+    # but naively fusing DLIO's global accumulated cloud into the LOCAL costmap
+    # injected phantom obstacles — the map is not perfectly ground-removed and
+    # carries odom drift, so smeared/residual points appeared as ghost blockers
+    # and A* detoured around free space (worse the longer it ran). Long-horizon
+    # memory needs a dedicated global planner on a clean global costmap, not this
+    # raw fusion. See docs/A_STAR_MPC_PLANNER.md.
     enable_dlio_map: false
     dlio_map_topic: /dlio/map_node/map
     dlio_map_max_age_sec: 30.0     # keyframe-rate map → tolerate a longer gap
@@ -50,17 +57,25 @@
     # the rolling-horizon goal projection still drives toward goals beyond it.
     grid_reso: 0.10
     grid_half_width: 6.0            # 12 m x 12 m local workspace
-    grid_std: 0.5                  # legacy (unused by the inflation costmap)
+    grid_std: 0.2                  # legacy (unused by the inflation costmap)
     # Robot-radius inflation (issue #2). The OLD Gaussian-CDF cost peaked at 0.5
     # exactly on an obstacle, so with obstacle_threshold 0.5 the planner kept
     # ZERO clearance and clipped corners. Now: lethal core = robot_radius (hard
     # block → guaranteed clearance), then a soft penalty band out to
     # inflation_radius that keeps paths off walls.
-    robot_radius: 0.35             # G1 base half-width + small margin
-    inflation_radius: 0.70
+    robot_radius: 0.35             # G1 base half-width + small margin (LETHAL core)
+    # Soft-penalty band OUT TO inflation_radius. Narrowed 0.70 → 0.50: the 0.70 m
+    # band (0.35 m beyond the lethal core) was too wide — combined with the high
+    # cost weight it made A* treat a broad halo around every obstacle as near-
+    # lethal, so it detoured around free space and could not thread normal gaps
+    # (doorways). 0.50 keeps paths off walls with only a ~0.15 m soft margin.
+    inflation_radius: 0.25
     publish_voxel_grid: false      # 3D voxel layer OFF (big per-cycle alloc)
     obstacle_threshold: 0.5
-    obstacle_cost_weight: 50.0
+    # Lowered 500 → 100: at 500 the soft band above acted like a wall (A* paid a
+    # huge cost to enter it), which is the other half of "inflation too wide".
+    # 100 makes the band a firm nudge off obstacles, not a no-go zone.
+    obstacle_cost_weight: 100.0
     replan_rate_hz: 3.0            # faster replans → reactive to moving obstacles
     goal_reached_radius: 0.25
     goal_heading_tolerance: 0.25    # MPC final heading tolerance (~14 deg)
@@ -111,7 +126,12 @@
     # so they must respect what AMO can track stably (vx ~0.3-0.5 m/s; biped vy
     # tiny; AMO saturates yaw at ±0.2 rad/s internally).
     mpc_vx_max: 0.45
-    mpc_vy_max: 0.45
+    # Lateral (crab) HARD cap — the most direct lever to DISCOURAGE y motion.
+    # 0.12 lets the biped take only small sidesteps (e.g. obstacle dodges) and
+    # otherwise walk/turn forward. Keep in step with the AMO bridge's
+    # max_lateral_vel. Set ~0.05 to effectively forbid crabbing (0 clamps to 0.01);
+    # mpc_R_vy (9.0) is the soft companion lever — raise it to discourage further.
+    mpc_vy_max: 0.12
     # Tuned to AMO's DEMONSTRATED yaw authority: it spins cleanly at a direct
     # --yaw 0.4 but ignores ~0.11, so its turn threshold is ~0.2-0.4. 0.20 (prev)
     # capped the command BELOW that threshold -> the MPC's gentle -0.11 produced
@@ -123,13 +143,19 @@
 
     # ─── Tracking weights ─────────────────────────────────────────
     mpc_Q_x: 300.0 # before: 150.0
-    mpc_Q_y: 300.0 # before: 150.0
+    mpc_Q_y: 150.0 # before: 150.0
     mpc_Q_yaw: 300.0 # before 5.0
-    mpc_Q_terminal: 180.0
+    mpc_Q_terminal: 1000.0 # before: 180.0
 
     # ─── Control effort ───────────────────────────────────────────
     mpc_R_vx: 20.0 # before: 8.0
-    mpc_R_vy: 12.0                 # discourage lateral commands more for biped
+    # Lowered 12 → 3 to ENABLE y-direction navigation: at 12 the MPCC almost never
+    # spent lateral effort, so it only ever drove forward + turned. At 3 it will
+    # crab sideways when that tracks the path or dodges an obstacle better. Raise
+    # back toward 12 if the biped's lateral gait looks unstable; drop toward 1 for
+    # more aggressive sidestepping. (For PURE sideways travel without turning to
+    # face the path, also lower mpcc_Q_yaw_align below.)
+    mpc_R_vy: 12.0
     # Lowered 9.0 -> 3.0: with high R_omega the MPC barely used its yaw authority
     # (commanded only ~-0.11 when misaligned, below AMO's turn threshold, so the
     # robot never turned). Lower effort penalty -> it commits real yaw to align.
@@ -142,10 +168,45 @@
     # regardless of what was in front of it. 80 gives firm avoidance while
     # staying well below the level that destabilises IPOPT.
     mpc_W_obs_sigmoid: 80.0
-    mpc_obs_alpha: 12.0
-    mpc_obs_r: 0.55                # humanoid base half-width + margin
-    mpc_max_obs_constraints: 12
+    # Sigmoid SHARPNESS. Lowered 12 → 6 (issue #3): at 12 the barrier only rose
+    # in the last ~0.2 m before obs_r, so avoidance was abrupt/late. At 6 the soft
+    # zone reaches ~0.4 m beyond obs_r, so the robot starts easing away from
+    # obstacles EARLIER (anticipatory) — a bigger real-world gain than simply
+    # raising W_obs_sigmoid, which just makes a taller wall at the same distance.
+    mpc_obs_alpha: 6.0
+    mpc_obs_r: 0.60                # humanoid base half-width + margin (raised 0.55→0.60 for clearance)
+    # Raised 12 → 14 (issue #3): points are now chosen with ANGULAR coverage
+    # (nearest per sector) instead of the 12 globally-nearest, so this budget
+    # represents obstacles on every side rather than one clump on the nearest wall.
+    mpc_max_obs_constraints: 14
     mpc_obs_check_radius: 3.0
+
+    # ─── Controller mode: tracking vs time-optimal contouring (MPCC) ──
+    # 'tracking'   : reference-tracking MPC — follows the A* path at a FIXED
+    #                cruise v_ref. Proven/stable, but NOT time-optimal (it leaves
+    #                speed budget unused).
+    # 'contouring' : MPCC — parameterises the path by arc length θ and MAXIMISES
+    #                progress (−q·θ) subject to the velocity limits and the
+    #                obstacle barrier, so the robot reaches the goal in MINIMUM
+    #                time while staying on the collision-free path. Holonomic vy
+    #                is allowed (crab-walk). Heavier NLP (7 states / 4 controls) —
+    #                watch solve_ms in /mpc/diagnostics; drop mpc_N or
+    #                mpcc_poly_degree if it nears the 1/mpc_rate_hz budget.
+    mpc_mode: contouring
+    mpcc_vtheta_max: 0.55           # max progress (arc-length) speed [m/s]
+    mpcc_w_contour: 300.0           # lateral path-deviation penalty (stay on path)
+    mpcc_w_lag: 60.0                # longitudinal θ-mismatch penalty
+    mpcc_q_progress: 2.0            # per-step reward on progress speed (push speed)
+    mpcc_q_progress_terminal: 60.0  # terminal reward on θ_N (push toward goal)
+    mpcc_Q_yaw_align: 40.0          # soft "face the path tangent" (low → crab freely)
+    # Terminal GOAL-heading weight: aligns the MPCC horizon-end yaw to the goal
+    # heading, ramped in over the last goal_align_start_dist metres. Active ONLY
+    # when require_goal_heading=true; else 0 (position-only arrival, tangent owns
+    # yaw). Lets the robot blend into the final heading during approach — no
+    # in-place spin — instead of the post-hoc _publish_heading_align rotation.
+    mpcc_Q_goal_yaw: 40.0
+    mpcc_R_vtheta: 0.1              # progress-rate effort
+    mpcc_poly_degree: 3             # local path polynomial fit order
 
     # ─── IPOPT ────────────────────────────────────────────────────
     mpc_max_iter: 100
@@ -191,6 +252,13 @@
     obs_cluster_cell: 0.30         # grid cell for connected-component clustering
     obs_static_speed: 0.15         # below this a cluster is static (not predicted)
     obs_max_track_speed: 2.5       # reject implausible centroid matches above this
+    # Temporal-consistency gate (dynamic-obstacle correctness): only extrapolate a
+    # cluster once its velocity agrees in direction with the previous frame's
+    # (cos >= this). Rejects phantom velocity from a STATIC wall whose centroid
+    # drifts as its observed extent changes across frames. Note obstacles are in
+    # the odom (world) frame, so the robot's own velocity is NOT (and must not be)
+    # subtracted — static obstacles already read ~zero velocity here.
+    obs_dir_consistency: 0.5       # cos(60°); higher = stricter "is it really moving"
     # RViz dynamic-obstacle velocity arrows (/mpc/obstacle_velocities): arrow
     # length = speed * this many seconds (1 m/s → 1 m arrow at 1.0).
     mpc_vel_arrow_scale: 1.0
@@ -216,10 +284,51 @@
     # stale; the AMO bridge has its own cmd_vel timeout on top of this.
     odom_timeout_sec: 0.5
     path_timeout_sec: 2.0
+
+    # ─── Soft-hold on transient solve failure (issue #1: stop/go) ──
+    # A single failed MPCC solve used to emit a HARD zero cmd_vel → the visible
+    # stop/go stutter. Instead coast on a decayed copy of the last good command
+    # for mpc_soft_hold_cycles solves (@10 Hz → ~0.3 s) before zeroing, so an
+    # occasional IPOPT miss no longer stops the robot. Danger/stale-data stops
+    # (security layer, fail-safe watchdog) are unaffected.
+    mpc_soft_hold_cycles: 3
+    mpc_soft_hold_decay: 0.6
+
     goal_heading_kp: 1.0
     goal_heading_min_omega: 0.20    # AMO ignores very small yaw commands
     goal_heading_max_omega: 0.40
+    # Final-approach heading blend (issue #2): during the last N metres steer yaw
+    # toward the GOAL heading so the robot arrives aligned instead of reaching the
+    # position and then spinning in place. Set 0.0 to disable (arrive-then-rotate).
+    goal_align_start_dist: 1.2
+    # Arrive REGARDLESS of heading: false = once x/y is within goal_reached_radius
+    # the robot STOPS (no in-place spin to the goal yaw, no approach yaw blend).
+    # Set true to require the final heading (restores arrive-then-align + blend).
+    require_goal_heading: false
 
     # ─── Persistent obstacle map ──────────────────────────────────
+    # Kept SHORT (10 s): a longer window (tried 45 s) smears obstacles across odom
+    # drift into ghost walls that make A* detour. Long-horizon memory belongs in a
+    # drift-corrected global planner, not this rolling local memory.
     map_decay_sec:  10.0
     map_max_cells:  8000
+
+    # ─── Global planner (long-horizon routing layer) ──────────────
+    # A separate world-fixed, COARSE global costmap remembers the whole traversed
+    # scene + a breadcrumb of where the robot drove (the safe corridor home), and
+    # global A* plans a long route on it → /global_path. The local A* follows a
+    # carrot along that route while its LIVE local costmap + MPCC do precise
+    # reactive avoidance. The global map is NEVER fused into the local costmap
+    # (that injected ghost obstacles). Disable the whole layer with launch arg
+    # global_planner:=false, or just the following with follow_global_path:=false.
+    follow_global_path: true
+    global_path_topic: /global_path
+    global_carrot_dist: 4.0          # carrot lookahead along the global route [m]
+    global_path_max_age_sec: 3.0     # fall back to direct goal if route is stale
+    global_replan_hz: 1.0            # global A* replan rate
+    global_reso: 0.20                # coarse → cheap + drift-tolerant
+    global_half_width: 25.0          # 50 m x 50 m global workspace
+    global_hit_threshold: 2.0        # cells need >=N observations to block (anti-ghost)
+    global_decay: 0.997              # slow per-build fade of stale obstacles
+    global_free_radius: 0.40         # breadcrumb free-space radius around the robot
+    max_range: 25.0                  # ingest obstacles within this radius of the robot

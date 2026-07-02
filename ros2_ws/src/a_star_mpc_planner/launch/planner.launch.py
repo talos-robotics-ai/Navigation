@@ -27,7 +27,8 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution, PythonExpression)
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -44,8 +45,16 @@ def generate_launch_description():
     amo_port = LaunchConfiguration('amo_port')
     ros_domain_id = LaunchConfiguration('ros_domain_id')
     rviz = LaunchConfiguration('rviz')
+    gait = LaunchConfiguration('gait')        # 'amo' | 'unitree'
+    net_if = LaunchConfiguration('net_if')    # robot NIC for the Unitree native gait
 
     common = [params_file, {'use_sim_time': use_sim_time}]
+
+    # Which gait consumes /mpc/cmd_vel — run exactly one (both drive the motors).
+    amo_bridge_on = IfCondition(PythonExpression(
+        ["'", bridge, "' == 'true' and '", gait, "' == 'amo'"]))
+    unitree_bridge_on = IfCondition(PythonExpression(
+        ["'", bridge, "' == 'true' and '", gait, "' == 'unitree'"]))
 
     a_star_node = Node(
         package='a_star_mpc_planner',
@@ -63,6 +72,17 @@ def generate_launch_description():
         parameters=common,
     )
 
+    # Global planner (long-horizon routing layer). Publishes /global_path that the
+    # local A* follows as a carrot. Toggle with global_planner:=false.
+    global_planner_node = Node(
+        package='a_star_mpc_planner',
+        executable='global_planner_node',
+        name='global_planner_node',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('global_planner')),
+        parameters=common,
+    )
+
     # Forward the MPC's Twist to the AMO WebSocket gait. cmd_vel_topic points at
     # /mpc/cmd_vel (the same bridge also serves teleop on /cmd_vel — run only one
     # source at a time). Caps are set at/above the MPC velocity envelope so they
@@ -72,17 +92,46 @@ def generate_launch_description():
         executable='cmd_vel_to_amo_node',
         name='cmd_vel_to_amo',
         output='screen',
-        condition=IfCondition(bridge),
+        condition=amo_bridge_on,
         parameters=[{
             'cmd_vel_topic': '/mpc/cmd_vel',
             'amo_host': amo_host,
             'amo_port': amo_port,
             'rate_hz': 20.0,
             'max_forward_vel': 0.5,
-            'max_lateral_vel': 0.1,
+            # Lateral cap — kept in step with mpc_vy_max (0.12) so the bridge
+            # never clips a vy the MPCC actually planned. Low value DISCOURAGES
+            # lateral motion (small dodges only). Set 0.0 to forbid it entirely.
+            'max_lateral_vel': 0.12,
             'max_yaw_rate': 0.8,
             # Fail-safe: zero the gait command if the MPC stops publishing.
             'cmd_timeout_sec': 0.5,
+            'use_sim_time': use_sim_time,
+        }],
+    )
+
+    # Alternative gait: forward /mpc/cmd_vel to the Unitree NATIVE (factory)
+    # walking policy via the Unitree SDK LocoClient (gait:=unitree). Mutually
+    # exclusive with the AMO bridge above. Reads the same /estop + watchdog
+    # contract; smooths the velocity command (the high-level analog of AMO joint
+    # filtering). The robot must be brought to walking control first — set
+    # auto_bring_up:=true here, or run `ros2 run g1_sim_bridge unitree_gait_test`.
+    cmd_vel_to_unitree_loco = Node(
+        package='g1_sim_bridge',
+        executable='cmd_vel_to_unitree_loco_node',
+        name='cmd_vel_to_unitree_loco',
+        output='screen',
+        condition=unitree_bridge_on,
+        parameters=[{
+            'cmd_vel_topic': '/mpc/cmd_vel',
+            'net_if': net_if,
+            'unitree_domain_id': 0,        # Unitree DDS domain (robot), != ROS domain
+            'rate_hz': 20.0,
+            'max_forward_vel': 0.5,
+            'max_lateral_vel': 0.12,
+            'max_yaw_rate': 0.8,
+            'cmd_timeout_sec': 0.5,
+            'auto_bring_up': False,        # SAFETY: bring up manually by default
             'use_sim_time': use_sim_time,
         }],
     )
@@ -111,8 +160,23 @@ def generate_launch_description():
             description='Use /clock (true in sim, false on the real robot).'),
         DeclareLaunchArgument(
             'bridge', default_value='true',
-            description='Also run g1_sim_bridge/cmd_vel_to_amo_node to forward '
-                        '/mpc/cmd_vel to the AMO WebSocket (:8766).'),
+            description='Run the gait bridge that forwards /mpc/cmd_vel to the '
+                        'selected gait (see gait:=). false = planner only.'),
+        DeclareLaunchArgument(
+            'gait', default_value='amo',
+            description="Which gait consumes /mpc/cmd_vel: 'amo' (RoboJuDo joint "
+                        "policy over WebSocket :8766) or 'unitree' (native factory "
+                        "gait via the Unitree SDK LocoClient). Run only one."),
+        DeclareLaunchArgument(
+            'net_if',
+            default_value=EnvironmentVariable('UNITREE_NET_IFACE', default_value='eth0'),
+            description='Robot network interface for the Unitree native gait '
+                        '(gait:=unitree). Defaults to $UNITREE_NET_IFACE.'),
+        DeclareLaunchArgument(
+            'global_planner', default_value='true',
+            description='Run the global planner layer (long-horizon /global_path '
+                        'the local A* follows as a carrot). Set false for '
+                        'local-only planning.'),
         DeclareLaunchArgument(
             'amo_host', default_value='127.0.0.1',
             description='Host of the AMO WebSocket server (amo_inference, :8766).'),
@@ -131,6 +195,8 @@ def generate_launch_description():
         SetEnvironmentVariable('ROS_DOMAIN_ID', ros_domain_id),
         a_star_node,
         mpc_node,
+        global_planner_node,
         cmd_vel_to_amo,
+        cmd_vel_to_unitree_loco,
         rviz_node,
     ])

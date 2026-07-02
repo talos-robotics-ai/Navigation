@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'a_star_node = a_star_mpc_planner.a_star_node:main',
             'mpc_node = a_star_mpc_planner.mpc_node:main',
+            'global_planner_node = a_star_mpc_planner.global_planner_node:main',
         ],
     },
 )
