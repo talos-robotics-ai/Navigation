@@ -248,8 +248,14 @@ docker compose run --rm localization bash
 build_ws        # rosdep + colcon; build/ install/ log/ persist on the host (git-ignored)
 ```
 
+On the **bare-metal Jetson** (building `ros2_ws` directly, not in the container),
+and for the day-to-day "what do I rebuild after an edit" workflow, see
+[docs/BUILDING.md](docs/BUILDING.md) — including the required
+`LIVOX_SDK2_ROOT=/opt/navigation` and why most Python edits need no rebuild.
+
 ## Docs
 
+- [docs/BUILDING.md](docs/BUILDING.md) — building `ros2_ws` natively on the Jetson after code changes (what to rebuild, the `LIVOX_SDK2_ROOT` rule).
 - [docs/system_architecture.md](docs/system_architecture.md) — end-to-end stack and data flow.
 - [docs/dockerfiles.md](docs/dockerfiles.md) — the three-image framework.
 - [docs/simulation_stack.md](docs/simulation_stack.md) — how the stack is wrapped into Isaac Sim (sim front-end).

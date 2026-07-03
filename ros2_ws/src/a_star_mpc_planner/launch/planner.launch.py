@@ -30,6 +30,7 @@ from launch.conditions import IfCondition
 from launch.substitutions import (
     EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution, PythonExpression)
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -45,16 +46,20 @@ def generate_launch_description():
     amo_port = LaunchConfiguration('amo_port')
     ros_domain_id = LaunchConfiguration('ros_domain_id')
     rviz = LaunchConfiguration('rviz')
-    gait = LaunchConfiguration('gait')        # 'amo' | 'unitree'
+    gait = LaunchConfiguration('gait')        # 'amo' | 'unitree' | 'sonic'
     net_if = LaunchConfiguration('net_if')    # robot NIC for the Unitree native gait
+    sonic_host = LaunchConfiguration('sonic_host')
+    sonic_port = LaunchConfiguration('sonic_port')
 
     common = [params_file, {'use_sim_time': use_sim_time}]
 
-    # Which gait consumes /mpc/cmd_vel — run exactly one (both drive the motors).
+    # Which gait consumes /mpc/cmd_vel — run exactly one (all drive the motors).
     amo_bridge_on = IfCondition(PythonExpression(
         ["'", bridge, "' == 'true' and '", gait, "' == 'amo'"]))
     unitree_bridge_on = IfCondition(PythonExpression(
         ["'", bridge, "' == 'true' and '", gait, "' == 'unitree'"]))
+    sonic_bridge_on = IfCondition(PythonExpression(
+        ["'", bridge, "' == 'true' and '", gait, "' == 'sonic'"]))
 
     a_star_node = Node(
         package='a_star_mpc_planner',
@@ -136,6 +141,39 @@ def generate_launch_description():
         }],
     )
 
+    # Alternative gait: forward /mpc/cmd_vel to the SONIC whole-body policy
+    # (gait:=sonic). The SONIC deploy controller is not a ROS 2 process — it SUBs
+    # a ZMQ PUB socket (:5556) and drives the robot over DDS — so this bridge is
+    # the ZMQ counterpart of the AMO/Unitree bridges and is mutually exclusive
+    # with them. Unlike those, it also reads /dlio/odom_node/odom: the MPC's Twist
+    # is body-frame but SONIC steers with WORLD-frame direction vectors, so the
+    # node anchors `facing` on measured yaw (closed loop, no heading drift).
+    cmd_vel_to_sonic = Node(
+        package='g1_sim_bridge',
+        executable='cmd_vel_to_sonic_node',
+        name='cmd_vel_to_sonic',
+        output='screen',
+        condition=sonic_bridge_on,
+        parameters=[{
+            'cmd_vel_topic': '/mpc/cmd_vel',
+            'odom_topic': '/dlio/odom_node/odom',
+            # The default '*' (ZMQ bind-all wildcard) is not valid YAML, so
+            # launch_ros can't infer the type — force string typing explicitly.
+            'zmq_host': ParameterValue(sonic_host, value_type=str),
+            'zmq_port': sonic_port,
+            'rate_hz': 30.0,
+            'max_forward_vel': 0.5,
+            'max_lateral_vel': 0.12,
+            'max_yaw_rate': 0.8,
+            'cmd_timeout_sec': 0.5,
+            # SONIC realises ~0.85x commanded m/s; feed-forward correction.
+            'speed_gain': 1.18,
+            # `facing` must lead measured heading or the policy never turns.
+            'facing_lookahead_sec': 0.4,
+            'use_sim_time': use_sim_time,
+        }],
+    )
+
     # Optional RViz, OFF by default. real_localization.launch.py already opens
     # the shared g1_dlio.rviz (which now includes the planner displays), so leave
     # this false when running the full stack to avoid two RViz windows. Set
@@ -165,13 +203,22 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'gait', default_value='amo',
             description="Which gait consumes /mpc/cmd_vel: 'amo' (RoboJuDo joint "
-                        "policy over WebSocket :8766) or 'unitree' (native factory "
-                        "gait via the Unitree SDK LocoClient). Run only one."),
+                        "policy over WebSocket :8766), 'unitree' (native factory "
+                        "gait via the Unitree SDK LocoClient), or 'sonic' (SONIC "
+                        "whole-body policy over ZMQ :5556). Run only one."),
         DeclareLaunchArgument(
             'net_if',
             default_value=EnvironmentVariable('UNITREE_NET_IFACE', default_value='eth0'),
             description='Robot network interface for the Unitree native gait '
                         '(gait:=unitree). Defaults to $UNITREE_NET_IFACE.'),
+        DeclareLaunchArgument(
+            'sonic_host', default_value='*',
+            description='Bind address of the SONIC ZMQ PUB socket (gait:=sonic). '
+                        "'*' binds all interfaces; the SONIC deploy controller "
+                        'SUBs it.'),
+        DeclareLaunchArgument(
+            'sonic_port', default_value='5556',
+            description='Port of the SONIC ZMQ PUB socket (gait:=sonic).'),
         DeclareLaunchArgument(
             'global_planner', default_value='true',
             description='Run the global planner layer (long-horizon /global_path '
@@ -198,5 +245,6 @@ def generate_launch_description():
         global_planner_node,
         cmd_vel_to_amo,
         cmd_vel_to_unitree_loco,
+        cmd_vel_to_sonic,
         rviz_node,
     ])

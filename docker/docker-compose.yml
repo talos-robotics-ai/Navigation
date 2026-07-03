@@ -8,6 +8,7 @@
 
 services:
   amo_policy:
+    platform: linux/arm64
     build:
       context: .
       dockerfile: Dockerfile.amo_policy
@@ -40,6 +41,7 @@ services:
     command: bash
 
   unitree:
+    platform: linux/arm64
     build:
       context: .
       dockerfile: Dockerfile.unitree
@@ -62,6 +64,7 @@ services:
     command: bash
 
   localization:
+    platform: linux/arm64
     build:
       context: .
       dockerfile: Dockerfile.localization

@@ -19,7 +19,11 @@
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>sensor_msgs_py</depend>
+  <depend>nav_msgs</depend>
   <exec_depend>python3-numpy</exec_depend>
+  <!-- pyzmq: SONIC gait bridge (cmd_vel_to_sonic_node) PUBs to the SONIC deploy
+       controller over ZMQ. Only needed for gait:=sonic. -->
+  <exec_depend>python3-zmq</exec_depend>
   <exec_depend>direct_lidar_inertial_odometry</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 
