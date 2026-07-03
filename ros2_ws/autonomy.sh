@@ -24,6 +24,9 @@
 #   PLANNER_DELAY=3     seconds to wait after localization before the planner,
 #                       so DLIO finishes its IMU/gravity init (hold the robot
 #                       STILL during this window). Set 0 to start them together.
+#   USE_RVIZ=1          open the on-board RViz (localization launch). Set 0 to run
+#                       headless — visualize remotely instead (Foxglove on the
+#                       laptop, or remote RViz), avoiding the Jetson GPU/NvMap load.
 set -uo pipefail
 
 # Resolve the workspace root: the nearest ancestor (or the script's own dir) that
@@ -57,6 +60,11 @@ if [[ -z "${ROS_DOMAIN_ID:-}" || "${ROS_DOMAIN_ID}" == "0" ]]; then
     export ROS_DOMAIN_ID=42
 fi
 PLANNER_DELAY="${PLANNER_DELAY:-3}"
+# On-board RViz on the Jetson renders with OGRE/OpenGL and eats the GPU/NvMap
+# carveout (NvMapMemAllocInternalTagged ... error 12). USE_RVIZ=0 runs the stack
+# headless — visualize remotely instead (foxglove_bridge -> Foxglove on the laptop).
+USE_RVIZ="${USE_RVIZ:-1}"
+if [[ "${USE_RVIZ}" == "0" ]]; then RVIZ_ARG="rviz:=false"; else RVIZ_ARG="rviz:=true"; fi
 
 # Which gait consumes /mpc/cmd_vel (forwarded to planner.launch.py). The bridge
 # for the selected gait is launched as part of the planner below; the reminder
@@ -119,7 +127,7 @@ run_launch() {
 
 echo ">> [1/2] localization (DLIO + g1_local_map) on ROS_DOMAIN_ID=${ROS_DOMAIN_ID} ..."
 echo ">>       logs -> ${LOCALIZATION_LOG}"
-run_launch "${LOCALIZATION_LOG}" ros2 launch g1_bringup real_localization.launch.py
+run_launch "${LOCALIZATION_LOG}" ros2 launch g1_bringup real_localization.launch.py "${RVIZ_ARG}"
 
 if (( PLANNER_DELAY > 0 )); then
     echo ">> waiting ${PLANNER_DELAY}s for DLIO IMU/gravity init — keep the robot STILL ..."

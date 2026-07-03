@@ -127,7 +127,7 @@ Visualization Manager:
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
       Color Transformer: AxisColor
-      Decay Time: 30
+      Decay Time: 3
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
@@ -137,9 +137,9 @@ Visualization Manager:
       Name: CloudRegistered
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 3
+      Size (Pixels): 2
       Size (m): 0.029999999329447746
-      Style: Flat Squares
+      Style: Points
       Topic:
         Depth: 5
         Durability Policy: Volatile
