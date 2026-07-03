@@ -11,6 +11,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Python virtual environments (e.g. amo/.venv from setup_jetson.sh)
+.venv/
+
 # Runtime logs from autonomy.sh (per-launch separated logs)
 ros2_ws/logs/
 ros2_ws/nav_bags/

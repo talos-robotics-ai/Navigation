@@ -154,6 +154,13 @@ RUN CYCLONEDDS_HOME=/opt/ros/humble pip3 install --no-cache-dir \
         'numpy<1.25' \
         'opencv-python<4.9'
 
+# ----------------------------------------------------------------------
+# pyzmq — required for gait:=sonic (the SONIC whole-body policy via
+# cmd_vel_to_sonic_node, which PUBs planner messages to the SONIC deploy
+# controller over ZMQ :5556). NOT needed for the default AMO gait or Unitree.
+# ----------------------------------------------------------------------
+RUN pip3 install --no-cache-dir pyzmq
+
 WORKDIR /ws
 
 CMD ["/bin/bash"]

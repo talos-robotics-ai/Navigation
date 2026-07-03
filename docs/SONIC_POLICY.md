@@ -4,14 +4,19 @@ Goal: run **NVIDIA GEAR-SONIC** as the **walking (locomotion) policy** for the G
 first in **sim2sim**, driven by velocity commands — eventually replacing the AMO
 gait so the A\*+MPC nav stack can drive SONIC exactly as it drives AMO today.
 
-Status: **PLAN ONLY.** The SONIC deploy stack is not yet on this machine and a few
-runtime details (exact ZMQ command schema, ROS 2 topic names, G1 obs/DDS wiring)
-must be confirmed against the cloned source — those points are flagged **TODO**
-below and must not be guessed at before deployment.
+Status: **nav→SONIC bridge IMPLEMENTED; sim2sim/hardware validation pending.**
+The ZMQ command schema is now resolved (the SONIC deploy repo is on this machine
+and its `planner`/`command` wire format is sim2sim-validated), and the Navigation
+stack ships a `gait:=sonic` bridge (`cmd_vel_to_sonic_node`, §5). What remains is
+operator-side: build the SONIC C++/TensorRT deploy runtime, then run the plan's
+validation sequence (drive the bridge in sim2sim, then on hardware). Milestones in
+§6 track this.
 
-> Priority note: this is deferred. Test the **current** AMO-based navigation first
-> (see [Appendix B](#appendix-b--test-the-current-nav-first)). Only start SONIC once
-> the current stack behaves.
+> Priority note: the SONIC **deploy runtime** (C++/TensorRT) is a separate build
+> that is NOT part of this repo — the bridge here only produces the ZMQ commands
+> it consumes. Test the **current** AMO-based navigation first
+> (see [Appendix B](#appendix-b--test-the-current-nav-first)); bring SONIC up in
+> sim2sim before any hardware use.
 
 ---
 
@@ -89,51 +94,88 @@ Bring SONIC up in simulation and drive it by hand first, to confirm the checkpoi
 
 ---
 
-## 4. Command interface for autonomy (the crux)
+## 4. Command interface for autonomy (RESOLVED)
 
-We need to inject the MPC's `(vx, vy, yaw)` into SONIC's planner programmatically.
-Two candidate channels the docs expose:
+We inject the MPC's `(vx, vy, wz)` into SONIC's planner over **ZMQ**. The wire
+format is now pinned down (from the SONIC deploy repo, sim2sim-validated) and
+encoded in [`sonic_wire.py`](../ros2_ws/src/g1_sim_bridge/g1_sim_bridge/sonic_wire.py):
 
-- **`--input-type zmq_manager`** — the manager accepts "motion index, frame,
-  operator state, planner state, **movement commands**" over ZMQ (default port
-  **5556**, topic `pose`). This is the most likely velocity-injection path.
-- **`--input-type ros2`** (only if the stack was built with ROS 2 support) —
-  publishes/subscribes DDS topics directly; could take a Twist-like command with no
-  extra bridge.
+- **Transport:** ZMQ **PUB** socket bound at `tcp://*:5556`; the SONIC deploy
+  controller SUBs it (`--input-type zmq_manager`).
+- **Message layout:** `topic_bytes + 1280-byte null-padded JSON header +
+  little-endian payload`. The header field order MUST match the payload order.
+- **Topics / fields:**
+  - `command` — `start:u8, stop:u8, planner:u8` (enter/leave planner mode).
+  - `planner` — `mode:i32, movement:f32[3], facing:f32[3], speed:f32, height:f32`
+    (+ optional `upper_body_position/velocity:f32[17]` to hold arms while walking).
+    `movement`/`facing` are **world-frame direction unit vectors**; `speed=-1` /
+    `height=-1` mean "use the mode default".
+- **Frame/sign conventions** (sim2sim-validated): `vx>0` forward, `vy>0` left,
+  `wz>0` CCW; **turning requires world frame** (a body-frame command alone never
+  updates `facing`). The planner realises ~0.85x commanded m/s (`speed_gain`
+  corrects).
 
-**TODO (blocking, from cloned source):**
-- exact ZMQ **socket type** (PUB/SUB vs PUSH/PULL) and the **movement-command
-  message schema** — field names/layout for velocity x/y, yaw/heading, gait, height,
-  mode. The docs do not publish it; it's in the C++ manager/ZMQ code.
-- for the `ros2` path: the exact **topic names + message types** it consumes/emits,
-  and whether the build has ROS 2 enabled.
-- the G1 **DDS wiring** it uses on the real robot (`rt/lowstate` / `rt/lowcmd`?),
-  for the eventual real-robot promotion.
-
-Until these are read from source, do not write the bridge payload — it would be a
-guess, and a wrong joint/command mapping on a humanoid is unsafe.
+Real-robot DDS wiring (`rt/lowcmd` etc.) lives inside the SONIC deploy runtime,
+not this repo — the bridge only produces the ZMQ commands above.
 
 ---
 
-## 5. The nav → SONIC bridge (mirrors `cmd_vel_to_amo`)
+## 5. The nav → SONIC bridge (IMPLEMENTED)
 
-Once §4 is pinned down, add a bridge analogous to
-[`cmd_vel_to_amo_node.py`](../ros2_ws/src/g1_sim_bridge/g1_sim_bridge/cmd_vel_to_amo_node.py):
+[`cmd_vel_to_sonic_node`](../ros2_ws/src/g1_sim_bridge/g1_sim_bridge/cmd_vel_to_sonic_node.py)
+is the third sibling of the AMO/Unitree bridges — same `/estop` latch and 0.5 s
+watchdog, same "run exactly one gait" contract — but its sink is ZMQ (§4) and it
+does one extra thing the others don't: a **closed-loop body→world frame
+conversion**. The whole A\*+MPC stack upstream is untouched; only the last hop
+changes.
 
-- **`cmd_vel_to_sonic_node`** (new node in `g1_sim_bridge`): subscribe `/mpc/cmd_vel`
-  (Twist), clip to caps, and **publish the SONIC movement-command over ZMQ**
-  (PUB → SONIC's `zmq_manager` SUB on :5556) at ~20 Hz. Keep the **same fail-safe
-  watchdog + `/estop` latch** already in the AMO bridge — critical on hardware.
-- Reuse the existing planner unchanged: it still emits `/mpc/cmd_vel`. Only the
-  *last hop* changes (WebSocket → ZMQ), so the whole A\*+MPC stack is untouched.
-- If the `ros2` input path works, we may skip the bridge entirely and have the
-  planner's Twist consumed directly — decide after reading §4.
+**Why the frame conversion (the crux):** the MPC emits a **body-frame** Twist
+(vx forward, vy left, wz yaw-rate), but SONIC's `planner` wants **world-frame**
+direction vectors, and turning only happens via `facing`. The stock SONIC bridge
+derives world heading open-loop (`theta += wz*dt`), which drifts. This node
+instead anchors on the **measured DLIO yaw** (`/dlio/odom_node/odom`):
 
-Launch integration: add a `sonic` bridge option to
-[`planner.launch.py`](../ros2_ws/src/a_star_mpc_planner/launch/planner.launch.py)
-mirroring the `cmd_vel_to_amo` node (arg `gait:=sonic|amo`), and a `sonic_policy`
-service in [`docker/docker-compose.yml`](../docker/docker-compose.yml) mirroring
-`amo_policy` (its own Dockerfile with the SONIC C++ runtime + TensorRT).
+```
+dth      = wrap(yaw_meas - yaw0)          # heading vs SONIC's start frame (yaw0 latched at start)
+movement = R(dth) . [vx, vy]              # body velocity -> world direction, using MEASURED yaw
+face     = dth + wz * facing_lookahead    # inject the MPC's turn intent AHEAD of truth
+facing   = [cos(face), sin(face)]
+speed    = min(hypot(vx,vy) * speed_gain, max_speed)
+```
+
+`facing_lookahead` (default 0.4 s) is **required** — without it `facing` == the
+current heading and the robot never turns; it converges back to `dth` as the
+measured yaw catches up and the MPC shrinks `wz`. `yaw0` is latched at control
+start, so the DLIO odom frame and SONIC's policy-start frame agree.
+
+The 17-DOF **upper-body hold** (carry an object while the legs walk) is exposed as
+optional node params `hold_arms` / `arm_preset` (`default` | `carry`) — a
+locomanipulation capability the AMO/Unitree bridges don't have.
+
+**Run it** — two equivalent ways:
+```bash
+# A) one-launch (bridge inside the planner):
+ros2 launch a_star_mpc_planner planner.launch.py gait:=sonic
+#   sonic_host:=*  sonic_port:=5556  by default (the SONIC deploy controller SUBs it)
+
+# B) standalone bridge via docker/run_sonic.sh (the run_amo.sh / run_unitree.sh
+#    equivalent). Start the planner with its own bridge OFF so this is the only
+#    driver, then run the bridge:
+ros2 launch a_star_mpc_planner planner.launch.py bridge:=false
+AUTONOMOUS=1 ./docker/run_sonic.sh          # track /mpc/cmd_vel -> SONIC ZMQ :5556
+#   JOYSTICK=1 ./docker/run_sonic.sh        # manual: teleop via /cmd_vel
+#   HOLD_ARMS=1 ARM_PRESET=carry ./docker/run_sonic.sh   # carry pose while walking
+```
+Start the SONIC deploy runtime (which SUBs :5556) first, then set a goal in RViz.
+`gait:=sonic` is mutually exclusive with `amo`/`unitree` — run only one.
+
+**Prerequisite in the container:** the bridge needs `pyzmq` in the localization
+container (rosdep key `python3-zmq`, declared in `g1_sim_bridge/package.xml`; also
+baked into `docker/Dockerfile.localization`). Rebuild the image / run `build_ws`
+so the dependency and the new `cmd_vel_to_sonic_node` entry point are present.
+
+The SONIC deploy runtime itself (C++/TensorRT) is out of scope for this repo — it
+would be its own `docker-compose` service (mirroring `amo_policy`) once built.
 
 ---
 
@@ -141,9 +183,13 @@ service in [`docker/docker-compose.yml`](../docker/docker-compose.yml) mirroring
 
 1. ☐ Clone GR00T-WBC, download checkpoints, build C++ (§2).
 2. ☐ Sim2sim keyboard/gamepad walk (§3) — SONIC walks, doesn't fall.
-3. ☐ Read the exact `zmq_manager`/`ros2` command schema from source (§4 TODOs).
-4. ☐ Write `cmd_vel_to_sonic_node`; drive SONIC in sim from a manual `/mpc/cmd_vel`.
-5. ☐ Full sim2sim autonomy: A\*+MPC → bridge → SONIC, goal set in RViz.
+3. ☑ Read the exact ZMQ command schema from source (§4) — encoded in `sonic_wire.py`.
+4. ◐ `cmd_vel_to_sonic_node` **written** and wired into `planner.launch.py`
+   (`gait:=sonic`); wire-format + body→world math unit-checked. **Still pending:**
+   drive SONIC in sim from a manual `/mpc/cmd_vel` (needs the deploy runtime up).
+5. ☐ Full sim2sim autonomy: A\*+MPC → bridge → SONIC, goal set in RViz. Confirm
+   `facing` tracks DLIO yaw with **no drift** over a long loop and `/estop`/watchdog
+   zero the robot.
 6. ☐ (later) Real-G1 promotion: JetPack 6 flash, calibration, safety bring-up.
 
 ---

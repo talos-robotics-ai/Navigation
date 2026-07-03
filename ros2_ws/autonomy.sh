@@ -8,12 +8,18 @@
 # tears BOTH down cleanly (the plain `cmd & cmd` form would orphan the first).
 #
 # This is the all-in-one alternative to starting the two launch files by hand
-# (see README "Autonomous navigation"). It runs in the ROS 2 / localization
-# container. The AMO gait still runs separately in the amo_policy container:
-#
-#     AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh
+# (see README "Autonomous navigation"). The gait that consumes /mpc/cmd_vel is
+# selected with GAIT= (forwarded to planner.launch.py as gait:=):
+#   GAIT=amo (default) — the AMO bridge is launched here; the AMO policy runs
+#                        separately: AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh
+#   GAIT=sonic         — the SONIC bridge is launched here; the SONIC controller
+#                        (g1_deploy_onnx_ref) must ALREADY be running FIRST, or it
+#                        misses the one-shot start handshake (docs/SONIC_REAL_BRINGUP.md).
+#   GAIT=unitree       — the native-gait bridge is launched here; bring the robot
+#                        to walking control first (docs/UNITREE_GAIT.md).
 #
 # Env overrides:
+#   GAIT=amo            gait consuming /mpc/cmd_vel: amo | sonic | unitree
 #   ROS_DOMAIN_ID=42    DDS domain (default 42; matches both launch files)
 #   PLANNER_DELAY=3     seconds to wait after localization before the planner,
 #                       so DLIO finishes its IMU/gravity init (hold the robot
@@ -51,6 +57,18 @@ if [[ -z "${ROS_DOMAIN_ID:-}" || "${ROS_DOMAIN_ID}" == "0" ]]; then
     export ROS_DOMAIN_ID=42
 fi
 PLANNER_DELAY="${PLANNER_DELAY:-3}"
+
+# Which gait consumes /mpc/cmd_vel (forwarded to planner.launch.py). The bridge
+# for the selected gait is launched as part of the planner below; the reminder
+# printed later depends on it (the SONIC/Unitree gaits need a process this script
+# does NOT start).
+GAIT="${GAIT:-amo}"
+case "${GAIT}" in
+    amo)     GAIT_NOTE="Start the AMO gait:  AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh" ;;
+    sonic)   GAIT_NOTE="SONIC controller must ALREADY be running (start it FIRST): cd ~/groot/sonic-g1-locomotion && scripts/start_deploy_real.sh" ;;
+    unitree) GAIT_NOTE="Bring the robot to walking control first (see docs/UNITREE_GAIT.md)." ;;
+    *)       GAIT_NOTE="gait:=${GAIT}" ;;
+esac
 
 # ── Separate logs for localization vs planner ────────────────────────────────
 # Both launches used to share this terminal, so DLIO/g1_local_map and the
@@ -108,9 +126,9 @@ if (( PLANNER_DELAY > 0 )); then
     sleep "${PLANNER_DELAY}"
 fi
 
-echo ">> [2/2] A*+MPC planner (+ cmd_vel -> AMO WS bridge) ..."
+echo ">> [2/2] A*+MPC planner (gait:=${GAIT}, its cmd_vel bridge) ..."
 echo ">>       logs -> ${PLANNER_LOG}"
-run_launch "${PLANNER_LOG}" ros2 launch a_star_mpc_planner planner.launch.py
+run_launch "${PLANNER_LOG}" ros2 launch a_star_mpc_planner planner.launch.py gait:=${GAIT}
 
 # ── Auto-record a ROS bag for troubleshooting ────────────────────────────────
 # Every autonomy run captures the nav topics to a timestamped bag (shares TS with
@@ -147,7 +165,7 @@ echo ""
 echo ">> both launches running. Read their logs SEPARATELY (each in its own terminal):"
 echo ">>     tail -f ${LOG_DIR}/localization_latest.log"
 echo ">>     tail -f ${LOG_DIR}/planner_latest.log"
-echo ">> Start the gait:  AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh"
+echo ">> ${GAIT_NOTE}"
 echo ">> then set a goal in RViz (2D Goal Pose -> /global_goal)."
 if [[ -n "${BAG_OUT}" ]]; then
     echo ">> recording -> ${BAG_OUT}"

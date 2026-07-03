@@ -1,20 +1,27 @@
 # Unitree native walking policy — navigation integration
 
-The A*+MPC stack can drive **either** gait, selected at launch:
+The A*+MPC stack can drive **any** of three gaits, selected at launch:
 
 | gait | how /mpc/cmd_vel reaches the robot | when |
 |---|---|---|
 | **amo** (default) | `cmd_vel_to_amo_node` → WebSocket :8766 → RoboJuDo AMO **joint** policy | current stack |
 | **unitree** | `cmd_vel_to_unitree_loco_node` → Unitree SDK DDS → **native LocoClient** | this doc |
+| **sonic** | `cmd_vel_to_sonic_node` → ZMQ :5556 → **SONIC whole-body policy** | [SONIC_POLICY.md](SONIC_POLICY.md) |
 
 Nothing upstream changes — A*, MPC, the global planner, RViz, `/estop`, the
 watchdog are all identical. Only the **last hop** (which gait consumes
-`/mpc/cmd_vel`) differs. Run **exactly one** gait (both command the motors).
+`/mpc/cmd_vel`) differs. Run **exactly one** gait (all command the motors).
 
 ```
-/global_goal ─► A* ─► MPC ─► /mpc/cmd_vel ─┬─(gait:=amo)──► cmd_vel_to_amo ──► WS :8766 ──► AMO joint policy
-                                           └─(gait:=unitree)► cmd_vel_to_unitree_loco ─► LocoClient.SetVelocity ─► native gait
+/global_goal ─► A* ─► MPC ─► /mpc/cmd_vel ─┬─(gait:=amo)────► cmd_vel_to_amo ─────► WS :8766 ──► AMO joint policy
+                                           ├─(gait:=unitree)► cmd_vel_to_unitree_loco ─► LocoClient.SetVelocity ─► native gait
+                                           └─(gait:=sonic)──► cmd_vel_to_sonic ────► ZMQ :5556 ─► SONIC whole-body policy
 ```
+
+> **sonic** is the only bridge that also reads odometry: the MPC's Twist is
+> body-frame but SONIC steers with **world-frame direction vectors**, so the node
+> anchors `facing` on measured DLIO yaw (closed loop). See
+> [SONIC_POLICY.md](SONIC_POLICY.md) for the frame reconciliation and bring-up.
 
 ## "Same joint filtering as AMO" — what it maps to here
 
@@ -190,4 +197,8 @@ stops. (Ensure the e-stop node runs on the same ROS domain — autonomy.sh force
 - [unitree_loco.py](../ros2_ws/src/g1_sim_bridge/g1_sim_bridge/unitree_loco.py) — LocoClient wrapper + VelocitySmoother + FSM bring-up
 - [cmd_vel_to_unitree_loco_node.py](../ros2_ws/src/g1_sim_bridge/g1_sim_bridge/cmd_vel_to_unitree_loco_node.py) — the bridge (mirrors cmd_vel_to_amo)
 - [unitree_gait_test.py](../ros2_ws/src/g1_sim_bridge/g1_sim_bridge/unitree_gait_test.py) — standalone stand/walk tester
-- [planner.launch.py](../ros2_ws/src/a_star_mpc_planner/launch/planner.launch.py) — `gait:=amo|unitree`, `net_if:=`
+- [planner.launch.py](../ros2_ws/src/a_star_mpc_planner/launch/planner.launch.py) — `gait:=amo|unitree|sonic`, `net_if:=`, `sonic_host:=`/`sonic_port:=`
+
+For the **sonic** gait bridge (`cmd_vel_to_sonic_node`, the ZMQ counterpart of
+the two above, with closed-loop body→world frame conversion) see
+[SONIC_POLICY.md](SONIC_POLICY.md).
