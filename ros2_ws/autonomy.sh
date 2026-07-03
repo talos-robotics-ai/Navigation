@@ -104,6 +104,13 @@ cleanup() {
     # SIGINT lets each `ros2 launch` shut its own nodes down gracefully.
     kill -INT "${pids[@]}" 2>/dev/null || true
     wait 2>/dev/null || true
+    # Backstop: the livox_ros_driver2 node IGNORES SIGINT, so it survives the
+    # graceful shutdown above and gets orphaned — spinning at ~50% CPU until the
+    # next reboot. Left unchecked, successive runs stack drivers (5 seen once =
+    # ~2.5 wasted cores). SIGKILL any survivor. Everything else (DLIO, planner,
+    # Python nodes) exits on the SIGINT; the SONIC policy is a separate process
+    # and is deliberately NOT touched here.
+    pkill -9 -f livox_ros_driver2_node 2>/dev/null || true
     exit 0
 }
 trap cleanup INT TERM
@@ -124,6 +131,16 @@ run_launch() {
     fi
     pids+=($!)
 }
+
+# Preflight: clear any leaked Livox driver before starting a fresh one. It ignores
+# SIGINT, so a prior run killed hard (e.g. an RViz crash taking the launch down)
+# leaves it spinning at ~50% CPU, and runs stack them. Only the Livox driver leaks;
+# DLIO/planner/Python nodes exit cleanly. Never touches the SONIC policy.
+if pgrep -f livox_ros_driver2_node >/dev/null 2>&1; then
+    echo ">> [preflight] stale livox_ros_driver2_node found (leaked from a prior run) — killing ..."
+    pkill -9 -f livox_ros_driver2_node 2>/dev/null || true
+    sleep 1
+fi
 
 echo ">> [1/2] localization (DLIO + g1_local_map) on ROS_DOMAIN_ID=${ROS_DOMAIN_ID} ..."
 echo ">>       logs -> ${LOCALIZATION_LOG}"
