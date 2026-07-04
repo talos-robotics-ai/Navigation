@@ -25,7 +25,7 @@
 #   2) localization:  ros2 launch a_star_mpc_planner planner.launch.py
 #   3) amo_policy:     AUTONOMOUS=1 NET_IF=enp12s0 ./run_amo.sh
 #   then send a goal in RViz ("2D Goal Pose" -> /global_goal). See
-#   docs/A_STAR_MPC_PLANNER.md and docs/system_architecture.md.
+#   docs/planning/A_STAR_MPC_PLANNER.md and docs/system/system_architecture.md.
 #
 # Env overrides:
 #   NET_IF=eth0      ./run_amo.sh ...    # CycloneDDS NIC to the robot

@@ -1,7 +1,7 @@
 """
 Joint-target smoothing for the AMO policy.
 
-Implements layer D of docs/amo_inference_plan.md (the always-on running filter)
+Implements layer D of docs/locomotion/amo_inference_plan.md (the always-on running filter)
 and the ``JointSmoother`` that composes the full smoothing stack:
 
     raw target_q ─► (A) startup pose blend ─► (D) slew/low-pass filter

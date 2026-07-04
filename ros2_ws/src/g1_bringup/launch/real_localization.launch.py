@@ -11,7 +11,7 @@ rescaled to m/s^2 first:
 There is NO pre-DLIO ground filter: the ground is a strong pitch/roll/Z constraint
 for the LiDAR-inertial odometry, so removing it upstream degrades DLIO. Ground
 removal happens DOWNSTREAM instead, inside g1_local_map on the accumulated
-odom-frame cloud (gravity-aware SVD; see docs/GROUND_REMOVAL_PLAN.md).
+odom-frame cloud (gravity-aware SVD; see docs/perception/GROUND_REMOVAL_PLAN.md).
 
 Key real-robot specifics:
   * xfer_format=0 -> the driver emits a PointCloud2 (PointXYZRTLT) with per-point
@@ -36,7 +36,7 @@ Run (inside the localization container, ws sourced, robot powered + on-network):
     ros2 launch g1_bringup real_localization.launch.py
     ros2 launch g1_bringup real_localization.launch.py rviz:=false robot_model:=false
 
-See docs/DLIO_DEPLOYMENT_TESTING.md (phases 5-7) and docs/DLIO_G1_MID360_TUNING.md.
+See docs/perception/DLIO_DEPLOYMENT_TESTING.md (phases 5-7) and docs/perception/DLIO_G1_MID360_TUNING.md.
 """
 import os
 

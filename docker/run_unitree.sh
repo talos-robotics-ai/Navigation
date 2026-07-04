@@ -9,7 +9,7 @@
 # the A*+MPC /mpc/cmd_vel and calls LocoClient.SetVelocity) or the standalone
 # unitree_gait_test tool (manual teleop / stand). Both apply the same velocity
 # smoothing (the high-level analog of AMO's joint filtering) — see
-# docs/UNITREE_GAIT.md and g1_sim_bridge/unitree_loco.py.
+# docs/locomotion/UNITREE_GAIT.md and g1_sim_bridge/unitree_loco.py.
 #
 # Runs the g1_sim_bridge nodes inside the localization image (which has the built
 # workspace); it needs the Unitree Python SDK installed there — see PREREQS.

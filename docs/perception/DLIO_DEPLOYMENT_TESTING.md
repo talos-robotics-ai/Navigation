@@ -193,7 +193,7 @@ Unitree gamepad ──js0──> joy_node ──/joy──> joy_to_cmdvel ──
 All three containers use host networking, so DDS (domain 0) and the WebSocket
 (`127.0.0.1:8766`) are shared across them and the host. (In sim the Isaac
 `--stabilize` AMO loop subscribes `/cmd_vel` directly, so no bridge is needed —
-see [`simulation_stack.md`](simulation_stack.md).)
+see [`simulation_stack.md`](../system/simulation_stack.md).)
 
 **Prerequisites**
 - Phase 6 green: DLIO localizes stably while the robot stands.

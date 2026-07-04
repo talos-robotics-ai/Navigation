@@ -70,6 +70,16 @@ grid in the odom frame (`VoxelAccumulator`):
 Keying voxels by absolute odom indices means the grid **never needs
 re-centring**; the robot-centred window is enforced purely by the prune step.
 
+> **Vectorised for the Jetson (2026-07-04).** `VoxelAccumulator` stores voxels as
+> two parallel numpy arrays — bit-packed `int64` keys + last-seen times — so
+> update/prune/`centers()` are single vectorised passes. This replaced a
+> dict-of-tuples with a Python loop per voxel per scan (~30–60 k iterations at
+> 10 Hz), the node's top CPU cost on the Orin Nano: **29.8 → 2.4 ms per scan,
+> output bit-identical.** The published cloud is now built directly from the
+> float32 buffer (`make_cloud_xyz32`) and the RViz-only `voxel_grid` topic is
+> skipped when nobody subscribes. See
+> [../planning/DISTRIBUTED_NAV_PLAN.md](../planning/DISTRIBUTED_NAV_PLAN.md) §9.
+
 > **Why accumulate _before_ removing ground.** A single MID-360 scan is sparse —
 > roughly one point per `ground_cell`. Per-cell ground segmentation on one scan
 > would treat that lone point as its own ground and drop nearly everything.
@@ -80,7 +90,7 @@ re-centring**; the robot-centred window is enforced purely by the prune step.
 ### 3. Ground removal — per-cell local-minimum filter
 Run on the **accumulated (dense)** voxel centres by
 `ground_segmentation.segment_ground` (a pure-numpy, ROS-free module; full design
-in [`docs/GROUND_SEGMENTATION.md`](GROUND_SEGMENTATION.md)). Heights are measured
+in [`docs/perception/GROUND_SEGMENTATION.md`](GROUND_SEGMENTATION.md)). Heights are measured
 along gravity-up (`−g_hat`, ≈ `+Z` for DLIO odom).
 
 1. **Tile** the cloud into XY cells of size `ground_cell` (default **0.40 m**).

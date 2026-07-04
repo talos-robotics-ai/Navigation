@@ -13,7 +13,7 @@ Per incoming scan (~10 Hz):
        per-voxel temporal decay  ── this DENSIFIES the sparse MID-360 scans
     3. ground removal on the ACCUMULATED (dense) cloud — gravity-aware per-cell
        SVD/eigen plane segmentation (ground_segmentation.segment_ground; see
-       docs/GROUND_REMOVAL_PLAN.md and docs/LOCAL_VOXEL_MAP.md)
+       docs/perception/GROUND_REMOVAL_PLAN.md and docs/perception/LOCAL_VOXEL_MAP.md)
     4. publish:
          <ns>/obstacles    PointCloud2    ground-removed obstacle voxel centres,
                                           odom frame → planner `obstacle_topic`
@@ -32,17 +32,47 @@ updates every scan and forgets what the robot walked past (decay).
 
 from __future__ import annotations
 
+import array
+
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Point
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 
 from g1_local_map.ground_segmentation import GroundParams, segment_ground
+
+_XYZ_FIELDS = [
+    PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+    PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+    PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+]
+
+
+def make_cloud_xyz32(header: Header, xyz: np.ndarray) -> PointCloud2:
+    """Build a PointCloud2 straight from an (N, 3) array — no per-point work.
+
+    sensor_msgs_py.create_cloud on an unstructured array round-trips through
+    unstructured_to_structured (an extra full copy) before serialising; at 10 Hz
+    with tens of thousands of voxel centres that copy is measurable on the Orin
+    Nano. Here the float32 buffer IS the message payload.
+    """
+    pts = np.ascontiguousarray(xyz, dtype=np.float32)
+    msg = PointCloud2()
+    msg.header = header
+    msg.height = 1
+    msg.width = pts.shape[0]
+    msg.fields = _XYZ_FIELDS
+    msg.is_bigendian = False
+    msg.point_step = 12
+    msg.row_step = 12 * pts.shape[0]
+    msg.is_dense = True
+    msg.data = pts.tobytes()
+    return msg
 
 
 def read_xyz(msg: PointCloud2) -> np.ndarray:
@@ -73,39 +103,69 @@ class VoxelAccumulator:
     needs re-centring); each stores the last time it was hit. Voxels older than
     ``persistence_s`` or outside the rolling window are evicted, bounding memory
     and forgetting obstacles the robot has passed.
+
+    Storage is two parallel numpy arrays — bit-packed int64 voxel keys (21 bits
+    per axis, valid to ±~100 km of odom travel at 0.1 m voxels) and last-seen
+    times — so update/prune/centers are single vectorised passes. The previous
+    dict-of-tuples version spent a Python-level loop per voxel per scan
+    (~30-60 k iterations at 10 Hz), the top CPU cost of this node on the Nano.
     """
+
+    _BITS = 21
+    _OFF = np.int64(1 << (_BITS - 1))          # index offset → non-negative
+    _MASK = np.int64((1 << _BITS) - 1)
 
     def __init__(self, voxel_size: float, persistence_s: float):
         self.voxel_size = float(voxel_size)
         self.persistence_s = float(persistence_s)
-        self._last_seen: dict[tuple[int, int, int], float] = {}
+        self._keys = np.empty(0, dtype=np.int64)     # sorted, unique
+        self._times = np.empty(0, dtype=np.float64)  # aligned with _keys
+
+    def _pack(self, idx: np.ndarray) -> np.ndarray:
+        q = idx + self._OFF
+        return (q[:, 0] << (2 * self._BITS)) | (q[:, 1] << self._BITS) | q[:, 2]
+
+    def _unpack(self) -> np.ndarray:
+        k = self._keys
+        ix = ((k >> (2 * self._BITS)) & self._MASK) - self._OFF
+        iy = ((k >> self._BITS) & self._MASK) - self._OFF
+        iz = (k & self._MASK) - self._OFF
+        return np.stack([ix, iy, iz], axis=1)
 
     def update(self, xyz: np.ndarray, now_s: float) -> None:
-        if xyz.shape[0]:
-            idx = np.floor(xyz / self.voxel_size).astype(np.int64)
-            for k in map(tuple, np.unique(idx, axis=0).tolist()):
-                self._last_seen[k] = now_s
+        if not xyz.shape[0]:
+            return
+        idx = np.floor(xyz / self.voxel_size).astype(np.int64)
+        new = np.unique(self._pack(idx))
+        # New keys first: np.unique(return_index) keeps the FIRST occurrence of
+        # each duplicate, so a re-hit voxel takes now_s over its stored time.
+        keys = np.concatenate([new, self._keys])
+        times = np.concatenate([np.full(new.shape[0], now_s), self._times])
+        self._keys, first = np.unique(keys, return_index=True)
+        self._times = times[first]
 
     def prune(self, now_s: float, center_xy: tuple[float, float], half_width: float) -> None:
-        if not self._last_seen:
+        if not self._keys.shape[0]:
             return
         cx, cy = center_xy
         reach = (half_width + self.voxel_size) / self.voxel_size
         ix0, iy0 = cx / self.voxel_size, cy / self.voxel_size
-        stale = now_s - self.persistence_s
-        dead = [
-            k for k, t in self._last_seen.items()
-            if t < stale or abs(k[0] - ix0) > reach or abs(k[1] - iy0) > reach
-        ]
-        for k in dead:
-            del self._last_seen[k]
+        ix = ((self._keys >> (2 * self._BITS)) & self._MASK) - self._OFF
+        iy = ((self._keys >> self._BITS) & self._MASK) - self._OFF
+        keep = (
+            (self._times >= now_s - self.persistence_s)
+            & (np.abs(ix - ix0) <= reach)
+            & (np.abs(iy - iy0) <= reach)
+        )
+        if not keep.all():
+            self._keys = self._keys[keep]
+            self._times = self._times[keep]
 
     def centers(self) -> np.ndarray:
         """(M, 3) float32 array of occupied voxel centre points in odom frame."""
-        if not self._last_seen:
+        if not self._keys.shape[0]:
             return np.empty((0, 3), dtype=np.float32)
-        keys = np.asarray(list(self._last_seen.keys()), dtype=np.float64)
-        return ((keys + 0.5) * self.voxel_size).astype(np.float32)
+        return ((self._unpack() + 0.5) * self.voxel_size).astype(np.float32)
 
 
 class LocalVoxelMapNode(Node):
@@ -247,9 +307,12 @@ class LocalVoxelMapNode(Node):
 
         # 4. publish every scan (even when empty) so the costmap stays live.
         header = Header(stamp=msg.header.stamp, frame_id=self.frame_id)
-        cloud = pc2.create_cloud_xyz32(header, obstacles)
+        cloud = make_cloud_xyz32(header, obstacles)
         self.obstacle_pub.publish(cloud)
-        self.voxel_pub.publish(cloud)
+        # voxel_grid duplicates the obstacle cloud for RViz/Foxglove only — skip
+        # the serialisation entirely when nobody is looking (headless runs).
+        if self.voxel_pub.get_subscription_count() > 0:
+            self.voxel_pub.publish(cloud)
         if self.costmap_pub is not None:
             self.costmap_pub.publish(self._build_costmap(obstacles, header, (cx, cy)))
 
@@ -276,7 +339,9 @@ class LocalVoxelMapNode(Node):
         msg.info.height = n
         msg.info.origin.position = Point(x=float(origin_x), y=float(origin_y), z=0.0)
         msg.info.origin.orientation.w = 1.0
-        msg.data = grid.flatten().tolist()
+        # array('b') adopts the int8 buffer directly; .tolist() built a 25k-element
+        # Python list per scan just for rclpy to convert it back.
+        msg.data = array.array('b', grid.tobytes())
         return msg
 
 

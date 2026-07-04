@@ -12,9 +12,9 @@ velocity → AMO gait → robot moves → new pose*. The navigation layer thinks
 `(vx, vy, yaw_rate)`. The MPC is the bridge between the two.
 
 See also: [dockerfiles.md](dockerfiles.md) (the three images),
-[amo_inference_plan.md](amo_inference_plan.md) (the gait + smoothing internals),
-[A_STAR_MPC_PLANNER.md](A_STAR_MPC_PLANNER.md) (the goal→velocity planner), and
-[LOCAL_VOXEL_MAP.md](LOCAL_VOXEL_MAP.md) (the ground-removed obstacle source).
+[amo_inference_plan.md](../locomotion/amo_inference_plan.md) (the gait + smoothing internals),
+[A_STAR_MPC_PLANNER.md](../planning/A_STAR_MPC_PLANNER.md) (the goal→velocity planner), and
+[LOCAL_VOXEL_MAP.md](../perception/LOCAL_VOXEL_MAP.md) (the ground-removed obstacle source).
 
 ---
 
@@ -136,7 +136,7 @@ flowchart LR
 - **Smoothing** (`JointSmoother`) guarantees no joint snap at activation: an
   S-curve blend from the captured posture to the first AMO reference + a
   soft→full PD-gain ramp (startup only), plus a per-tick clamp always on, and an
-  optional always-on slew filter. Details in [amo_inference_plan.md](amo_inference_plan.md).
+  optional always-on slew filter. Details in [amo_inference_plan.md](../locomotion/amo_inference_plan.md).
 
 ---
 
@@ -186,4 +186,4 @@ flowchart LR
    `ros2 topic pub --once /global_goal …`. The robot then walks the planned path.
 
 Dry run first with `NET_IF=eth0 ./run_amo.sh --observe_only` (no motor commands).
-Full planner details + tuning: [A_STAR_MPC_PLANNER.md](A_STAR_MPC_PLANNER.md).
+Full planner details + tuning: [A_STAR_MPC_PLANNER.md](../planning/A_STAR_MPC_PLANNER.md).

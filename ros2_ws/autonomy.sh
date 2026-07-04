@@ -14,9 +14,9 @@
 #                        separately: AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh
 #   GAIT=sonic         — the SONIC bridge is launched here; the SONIC controller
 #                        (g1_deploy_onnx_ref) must ALREADY be running FIRST, or it
-#                        misses the one-shot start handshake (docs/SONIC_REAL_BRINGUP.md).
+#                        misses the one-shot start handshake (docs/locomotion/SONIC_REAL_BRINGUP.md).
 #   GAIT=unitree       — the native-gait bridge is launched here; bring the robot
-#                        to walking control first (docs/UNITREE_GAIT.md).
+#                        to walking control first (docs/locomotion/UNITREE_GAIT.md).
 #
 # Env overrides:
 #   GAIT=amo            gait consuming /mpc/cmd_vel: amo | sonic | unitree
@@ -74,7 +74,7 @@ GAIT="${GAIT:-amo}"
 case "${GAIT}" in
     amo)     GAIT_NOTE="Start the AMO gait:  AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh" ;;
     sonic)   GAIT_NOTE="SONIC controller must ALREADY be running (start it FIRST): cd ~/groot/sonic-g1-locomotion && scripts/start_deploy_real.sh" ;;
-    unitree) GAIT_NOTE="Bring the robot to walking control first (see docs/UNITREE_GAIT.md)." ;;
+    unitree) GAIT_NOTE="Bring the robot to walking control first (see docs/locomotion/UNITREE_GAIT.md)." ;;
     *)       GAIT_NOTE="gait:=${GAIT}" ;;
 esac
 

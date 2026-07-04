@@ -211,6 +211,20 @@
     # ─── IPOPT ────────────────────────────────────────────────────
     mpc_max_iter: 100
     mpc_warm_start: true
+    # Control-grade termination (Jetson §8 optimization): IPOPT's default KKT
+    # tolerance is 1e-8 — digits a 10 Hz velocity command can never use, paid
+    # for in iterations every solve. 1e-3 + early-accept returns as soon as the
+    # solution is control-accurate (benchmarked: −32% mean solve time, worst
+    # case halved, 100% solve success on the deployed MPCC problem).
+    mpc_ipopt_tol: 1.0e-3
+    mpc_ipopt_acceptable_tol: 1.0e-2
+    mpc_ipopt_acceptable_iter: 3
+    # HANG GUARD, not a per-cycle budget: must stay well above a COLD solve on
+    # the Orin Nano (~150 ms). Only stops a pathological multi-second solve
+    # from freezing the loop; the soft-hold path absorbs the missed cycle.
+    # Do NOT tighten to the 100 ms period — an 80 ms wall made every recovery
+    # solve time out and cascaded into permanent failure in benchmarks.
+    mpc_max_cpu_time: 0.3
 
     # ─── MPC node settings ────────────────────────────────────────
     # Velocity-control loop rate: the MPC re-solves and republishes /mpc/cmd_vel
@@ -279,6 +293,26 @@
     mpc_security_engage_cycles: 3
     mpc_security_clear_cycles: 5
 
+    # ─── Dynamic-obstacle YIELD (safety) ──────────────────────────
+    # A CONFIRMED-dynamic cluster (cluster tracker + temporal-consistency gate)
+    # inside — or predicted within yield_lookahead_sec to enter — the forward
+    # corridor makes the robot STOP and hold until the mover has passed
+    # (debounced both ways). Takes precedence over the security escape: a
+    # sidestep around a walking person could step INTO their path.
+    yield_enable: true
+    yield_corridor_length: 2.5      # corridor ahead of the robot [m]
+    yield_corridor_halfwidth: 0.7   # corridor lateral half-width [m]
+    yield_lookahead_sec: 1.5        # extrapolate movers this far ahead
+    yield_engage_cycles: 2          # debounce in (~0.2 s @ 10 Hz)
+    yield_clear_cycles: 8           # debounce out (~0.8 s @ 10 Hz)
+
+    # ─── Perception blind-stop (safety) ───────────────────────────
+    # Past lidar_max_age_sec the MPC now HOLDS the last obstacle cloud (odom
+    # frame — static structure stays valid) instead of planning with NO
+    # obstacles as before. If the feed stays silent past this, hard stop:
+    # never walk toward a goal blind. 0 disables (not recommended on-robot).
+    lidar_blind_stop_sec: 2.5
+
     # ─── Fail-safe watchdog (issue #5) ────────────────────────────
     # The MPC commands ZERO velocity (not a silent hold) when pose or path goes
     # stale; the AMO bridge has its own cmd_vel timeout on top of this.
@@ -323,6 +357,24 @@
     # global_planner:=false, or just the following with follow_global_path:=false.
     follow_global_path: true
     global_path_topic: /global_path
+
+    # ─── Global+local costmap fusion (quality-gated) ──────────────
+    # Fuses the global planner's CONFIRMED obstacle cells
+    # (/global_planner/known_obstacles: hit-thresholded, decay-faded,
+    # breadcrumb-carved, PRE-inflation) into the local A* grid as direct
+    # obstacles once the global map is mature — long-horizon wall memory
+    # without the phantom-obstacle failure of raw DLIO-map fusion.
+    #   off  : previous behaviour (carrot-following only)
+    #   on   : always fuse whatever the global layer has confirmed
+    #   auto : fuse once >= global_fusion_min_cells cells are confirmed
+    # Near-field cells (< global_fusion_min_range) are NEVER fused: the live
+    # local map owns that zone, so a stale global cell can re-route the robot
+    # but can never freeze it in place.
+    global_fusion_mode: auto
+    global_fusion_topic: /global_planner/known_obstacles
+    global_fusion_min_range: 3.0
+    global_fusion_min_cells: 150
+    global_fusion_max_age_sec: 10.0
     global_carrot_dist: 4.0          # carrot lookahead along the global route [m]
     global_path_max_age_sec: 3.0     # fall back to direct goal if route is stale
     global_replan_hz: 1.0            # global A* replan rate

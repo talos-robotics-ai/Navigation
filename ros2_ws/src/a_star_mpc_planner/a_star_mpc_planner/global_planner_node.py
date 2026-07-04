@@ -11,7 +11,7 @@ This keeps the two concerns cleanly separated:
   * global costmap  → coarse, persistent, drift-tolerant (hit-thresholded);
                       used ONLY to choose the route. Never fused into the local
                       costmap (that fusion injected ghost obstacles — see
-                      docs/A_STAR_MPC_PLANNER.md).
+                      docs/planning/A_STAR_MPC_PLANNER.md).
   * local  costmap  → live, clean, reactive; unchanged.
 
 Subscribes:
@@ -24,6 +24,8 @@ Publishes:
   /global_planner/costmap     nav_msgs/OccupancyGrid  — the global costmap (RViz)
 """
 
+import array
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -33,6 +35,7 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header
 
 from a_star_mpc_planner.a_star_planner import AStarPlanner
 from a_star_mpc_planner.global_costmap import GlobalCostmap
@@ -117,6 +120,11 @@ class GlobalPlannerNode(Node):
             Path, str(self.get_parameter('global_path_topic').value), 10)
         self._costmap_pub = self.create_publisher(
             OccupancyGrid, '/global_planner/costmap', latched_qos)
+        # Raw CONFIRMED obstacle cells (pre-inflation, anti-ghost-gated) for the
+        # local A*'s global+local fusion mode. Latched so a late-joining local
+        # planner gets the map immediately. Coarse grid → a few k points at 1 Hz.
+        self._known_obs_pub = self.create_publisher(
+            PointCloud2, '/global_planner/known_obstacles', latched_qos)
 
         rate = float(self.get_parameter('global_replan_hz').value)
         self.create_timer(1.0 / max(0.1, rate), self._replan_cb)
@@ -168,8 +176,16 @@ class GlobalPlannerNode(Node):
             ogm.info.origin.position.x = self._costmap.minx
             ogm.info.origin.position.y = self._costmap.miny
             ogm.info.origin.orientation.w = 1.0
-            ogm.data = (self._costmap.gmap.T.flatten() * 100.0).clip(0, 100).astype(np.int8).tolist()
+            scaled = (self._costmap.gmap.T.flatten() * 100.0).clip(0, 100).astype(np.int8)
+            ogm.data = array.array('b', scaled.tobytes())
             self._costmap_pub.publish(ogm)
+
+        # Publish the raw confirmed-hit cells for the local planner's fusion mode.
+        hits = self._costmap.confirmed_hit_points()
+        if hits is not None:
+            hdr = Header(stamp=self.get_clock().now().to_msg(), frame_id=self._frame)
+            pts3 = np.column_stack([hits, np.zeros(len(hits))]).astype(np.float32)
+            self._known_obs_pub.publish(point_cloud2.create_cloud_xyz32(hdr, pts3))
 
         dist_to_goal = float(np.linalg.norm(self._pose_xy - self._goal_xy))
         if dist_to_goal <= self._goal_reached_radius:

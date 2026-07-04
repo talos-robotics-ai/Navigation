@@ -51,6 +51,7 @@ Architecture
     /a_star/height_map        std_msgs/Float32MultiArray — 2.5D max-z per cell
 """
 
+import array
 import math
 
 import numpy as np
@@ -196,6 +197,26 @@ class AStarNode(Node):
         self.declare_parameter('enable_dlio_map',     False)
         self.declare_parameter('dlio_map_topic',      '/dlio/map_node/map')
         self.declare_parameter('dlio_map_max_age_sec', 30.0)
+        # ── Global+local fusion (global planner's confirmed obstacles) ──
+        # Fuses the GLOBAL PLANNER's confirmed-hit cells
+        # (/global_planner/known_obstacles: hit-thresholded ≥N observations,
+        # decay-faded, breadcrumb-carved, pre-inflation) into the local costmap
+        # as direct obstacles — long-horizon memory of walls that left the live
+        # sensor FOV, WITHOUT the phantom-obstacle failure of raw DLIO-map
+        # fusion (that map was un-thresholded and carried odom drift).
+        #   mode 'off'  : never fuse (previous behaviour).
+        #   mode 'on'   : fuse whenever the global layer publishes.
+        #   mode 'auto' : fuse only once the global map is "well constructed" —
+        #                 ≥ global_fusion_min_cells confirmed cells — so early,
+        #                 sparse knowledge never pollutes the clean local map.
+        # Cells closer than global_fusion_min_range to the robot are NEVER fused:
+        # near-field is the live local map's authority, so a stale global cell
+        # can slow a route but can never freeze the robot in place.
+        self.declare_parameter('global_fusion_mode',        'auto')
+        self.declare_parameter('global_fusion_topic',       '/global_planner/known_obstacles')
+        self.declare_parameter('global_fusion_min_range',   3.0)
+        self.declare_parameter('global_fusion_min_cells',   150)
+        self.declare_parameter('global_fusion_max_age_sec', 10.0)
         # Ceiling/overhang cap for fused DLIO-map points, expressed RELATIVE to
         # the robot's current odom z (the sensor height). The planner is 2D, so
         # any point — including ceilings and overhangs — projects to an XY
@@ -322,6 +343,23 @@ class AStarNode(Node):
         self._dlio_map_pts: np.ndarray | None = None   # (N, 3) xyz in odom frame
         self._dlio_map_t: float = 0.0
 
+        # Global+local fusion state (global planner's confirmed obstacle cells)
+        self._global_fusion_mode = str(
+            self.get_parameter('global_fusion_mode').value).strip().lower()
+        if self._global_fusion_mode not in ('off', 'on', 'auto'):
+            self.get_logger().warning(
+                f"unknown global_fusion_mode={self._global_fusion_mode!r}; using 'off'")
+            self._global_fusion_mode = 'off'
+        self._global_fusion_min_range = float(
+            self.get_parameter('global_fusion_min_range').value)
+        self._global_fusion_min_cells = int(
+            self.get_parameter('global_fusion_min_cells').value)
+        self._global_fusion_max_age = float(
+            self.get_parameter('global_fusion_max_age_sec').value)
+        self._global_fusion_pts: np.ndarray | None = None   # (K, 3) odom frame
+        self._global_fusion_t: float = 0.0
+        self._global_fusion_announced = False   # log auto-enable exactly once
+
         # ── TF2 (used for SLAM map frame → planner frame transform) ───
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -420,6 +458,26 @@ class AStarNode(Node):
             )
         else:
             self.get_logger().info('DLIO 3D map fusion: disabled (enable_dlio_map=false)')
+
+        if self._global_fusion_mode != 'off' and not external:
+            gf_topic = str(self.get_parameter('global_fusion_topic').value)
+            # TRANSIENT_LOCAL to match the global planner's latched publisher —
+            # a restarted local planner receives the map immediately.
+            gf_qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
+            self.create_subscription(
+                PointCloud2, gf_topic, self._global_fusion_cb, gf_qos)
+            self.get_logger().info(
+                f'global+local fusion: mode={self._global_fusion_mode}  '
+                f'topic={gf_topic}  min_range={self._global_fusion_min_range}m  '
+                f'min_cells={self._global_fusion_min_cells}')
+        else:
+            self.get_logger().info(
+                f'global+local fusion: disabled (mode={self._global_fusion_mode})')
 
         # ── Publishers ────────────────────────────────────────────────
         self._path_pub   = self.create_publisher(Path,               '/a_star/path',                10)
@@ -675,6 +733,54 @@ class AStarNode(Node):
                 f'[A*-DLIO] map updated: {len(self._dlio_map_pts)} pts',
             )
 
+    def _global_fusion_cb(self, msg: PointCloud2) -> None:
+        """Cache the global planner's confirmed obstacle cells (odom frame)."""
+        try:
+            pts = read_xyz(msg)
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warning(
+                f'[A*-GF] known-obstacles parse error: {exc}', throttle_duration_sec=5.0)
+            return
+        self._global_fusion_pts = pts if len(pts) > 0 else None
+        self._global_fusion_t = self.get_clock().now().nanoseconds * 1e-9
+
+    def _extract_global_fusion_points(self, robot_xy: np.ndarray) -> np.ndarray | None:
+        """Global-planner cells to fuse this cycle, or None.
+
+        Applies the maturity gate (auto mode), staleness, the local-window crop
+        and the near-field annulus (cells within global_fusion_min_range of the
+        robot are the live map's authority — never fused, so a stale global
+        cell can re-route the robot but can never trap it).
+        """
+        if self._global_fusion_mode == 'off' or self._global_fusion_pts is None:
+            return None
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self._global_fusion_t > self._global_fusion_max_age:
+            return None
+        pts = self._global_fusion_pts
+        if self._global_fusion_mode == 'auto':
+            if len(pts) < self._global_fusion_min_cells:
+                self.get_logger().info(
+                    f'[A*-GF] global map not yet mature '
+                    f'({len(pts)}/{self._global_fusion_min_cells} cells) — not fusing',
+                    throttle_duration_sec=10.0,
+                )
+                return None
+            if not self._global_fusion_announced:
+                self._global_fusion_announced = True
+                self.get_logger().info(
+                    f'[A*-GF] global map mature ({len(pts)} confirmed cells) — '
+                    f'global+local fusion ACTIVE')
+        hw = self._grid_map.half_width
+        dx = pts[:, 0] - robot_xy[0]
+        dy = pts[:, 1] - robot_xy[1]
+        mask = (
+            (np.abs(dx) < hw) & (np.abs(dy) < hw)
+            & (dx * dx + dy * dy >= self._global_fusion_min_range ** 2)
+        )
+        sel = pts[mask]
+        return sel if len(sel) > 0 else None
+
     def _external_costmap_cb(self, msg: Float32MultiArray) -> None:
         """Decode a pre-computed cost grid (external_grid backend).
 
@@ -901,6 +1007,16 @@ class AStarNode(Node):
                 throttle_duration_sec=2.0,
             )
 
+        # Fuse the global planner's confirmed obstacle cells (global+local mode):
+        # anti-ghost long-horizon memory, far-field only (see extraction gate).
+        gf_pts = self._extract_global_fusion_points(drone_xy)
+        if gf_pts is not None:
+            direct_list.append(gf_pts)
+            self.get_logger().debug(
+                f'[A*-GF] fused {len(gf_pts)} global confirmed cells',
+                throttle_duration_sec=2.0,
+            )
+
         direct_obstacles = np.vstack(direct_list) if direct_list else None
         self._grid_map.update(
             self._lidar_points, drone_xy,
@@ -963,15 +1079,19 @@ class AStarNode(Node):
             ogm.info.origin.position.x = self._grid_map.minx
             ogm.info.origin.position.y = self._grid_map.miny
             ogm.info.origin.orientation.w = 1.0
+            # array('b')/array('f') adopt the numpy buffers directly; .tolist()
+            # built 15-40k-element Python lists per replan just for rclpy to
+            # convert them straight back.
             scaled = (self._grid_map.gmap.T.flatten() * 100.0).clip(0, 100).astype(np.int8)
-            ogm.data = scaled.tolist()
+            ogm.data = array.array('b', scaled.tobytes())
             self._grid_pub.publish(ogm)
 
             # Publish raw grid for MPC node
             raw_msg = Float32MultiArray()
             gm = self._grid_map
-            meta = [float(gm.minx), float(gm.miny), float(gm.reso), float(gm.cells)]
-            raw_msg.data = meta + gm.gmap.flatten(order='C').astype(np.float32).tolist()
+            meta = np.array([gm.minx, gm.miny, gm.reso, gm.cells], dtype=np.float32)
+            raw_payload = np.concatenate([meta, gm.gmap.flatten(order='C').astype(np.float32)])
+            raw_msg.data = array.array('f', raw_payload.tobytes())
             self._raw_pub.publish(raw_msg)
 
             # Publish 2.5D max-z layer for find_safe_stop_pose. Same row-major
@@ -979,7 +1099,8 @@ class AStarNode(Node):
             # identical meta. NaN sentinel for untouched cells.
             if gm.hmap is not None:
                 height_msg = Float32MultiArray()
-                height_msg.data = meta + gm.hmap.flatten(order='C').astype(np.float32).tolist()
+                h_payload = np.concatenate([meta, gm.hmap.flatten(order='C').astype(np.float32)])
+                height_msg.data = array.array('f', h_payload.tobytes())
                 self._height_pub.publish(height_msg)
 
             # Publish 3D voxel layer as a sparse PointCloud2 — one point per
@@ -993,7 +1114,7 @@ class AStarNode(Node):
                     wx = occ[:, 0].astype(np.float32) * gm.reso + gm.minx + half
                     wy = occ[:, 1].astype(np.float32) * gm.reso + gm.miny + half
                     wz = occ[:, 2].astype(np.float32) * gm.reso + gm.z_min + half
-                    voxel_pts = np.stack([wx, wy, wz], axis=1).tolist()
+                    voxel_pts = np.stack([wx, wy, wz], axis=1)
                     hdr_v = Header(stamp=stamp, frame_id=self._pose_frame)
                     self._voxel_pub.publish(
                         point_cloud2.create_cloud_xyz32(hdr_v, voxel_pts)
@@ -1005,7 +1126,8 @@ class AStarNode(Node):
         )
         if all_cells is not None:
             hdr = Header(stamp=stamp, frame_id=self._pose_frame)
-            pc = point_cloud2.create_cloud_xyz32(hdr, all_cells[:, :3].tolist())
+            pc = point_cloud2.create_cloud_xyz32(
+                hdr, np.asarray(all_cells)[:, :3].astype(np.float32))
             self._pmap_pub.publish(pc)
 
 
@@ -1105,7 +1227,7 @@ class AStarNode(Node):
             ogm.info.origin.position.y = grid.miny
             ogm.info.origin.orientation.w = 1.0
             scaled = (grid.gmap.T.flatten() * 100.0).clip(0, 100).astype(np.int8)
-            ogm.data = scaled.tolist()
+            ogm.data = array.array('b', scaled.tobytes())
             self._grid_pub.publish(ogm)
 
 

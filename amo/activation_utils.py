@@ -1,5 +1,5 @@
 """
-Pure smooth-activation helpers (layers A/B/C of docs/amo_inference_plan.md).
+Pure smooth-activation helpers (layers A/B/C of docs/locomotion/amo_inference_plan.md).
 
 Dependency-free (numpy only, no robojudo / torch / DDS / argparse) so they can
 be unit-tested without a robot. Mirrors the proven helpers used by the

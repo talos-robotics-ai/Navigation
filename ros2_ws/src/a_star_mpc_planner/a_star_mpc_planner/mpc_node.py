@@ -14,7 +14,7 @@ deployment layer:
   - the velocity command is published as a Twist on /mpc/cmd_vel. The Navigation
     AMO policy is NOT a ROS 2 process: g1_sim_bridge/cmd_vel_to_amo_node forwards
     that Twist as {vx,vy,yaw} JSON to the AMO WebSocket server (:8766). See
-    docs/system_architecture.md.
+    docs/system/system_architecture.md.
 
 Architecture
 ------------
@@ -67,6 +67,14 @@ try:
     _SCIPY_OK = True
 except ImportError:
     _SCIPY_OK = False
+
+# Connected-component labelling for obstacle clustering; fallback to the
+# pure-Python union-find when scipy is unavailable.
+try:
+    from scipy import ndimage as _ndimage
+    _NDIMAGE_OK = True
+except ImportError:
+    _NDIMAGE_OK = False
 
 
 def _read_xyz(msg: PointCloud2) -> np.ndarray:
@@ -129,6 +137,13 @@ class MPCNode(Node):
         self.declare_parameter('mpc_obs_check_radius',    2.0)
         self.declare_parameter('mpc_max_iter',   100)
         self.declare_parameter('mpc_warm_start',  True)
+        # Control-grade IPOPT termination (see tracker configs): KKT tolerance a
+        # 10 Hz velocity loop actually needs, early-accept, and a hard per-solve
+        # CPU bound so one slow solve can never blow through the control period.
+        self.declare_parameter('mpc_ipopt_tol',             1e-3)
+        self.declare_parameter('mpc_ipopt_acceptable_tol',  1e-2)
+        self.declare_parameter('mpc_ipopt_acceptable_iter', 3)
+        self.declare_parameter('mpc_max_cpu_time',          0.08)
         self.declare_parameter('mpc_rate_hz',       2.0)
         self.declare_parameter('mpc_lookahead_dist', 0.5)
         self.declare_parameter('max_lidar_range',  6.0)
@@ -182,6 +197,28 @@ class MPCNode(Node):
         self.declare_parameter('mpc_security_escape_radius', 1.0)
         self.declare_parameter('mpc_security_engage_cycles', 3)      # debounce in
         self.declare_parameter('mpc_security_clear_cycles',  5)      # debounce out
+
+        # ── Dynamic-obstacle YIELD (safety) ──────────────────────────────────
+        # A CONFIRMED-dynamic cluster (from the tracker below) inside — or
+        # predicted to enter within yield_lookahead_sec — the forward corridor
+        # (yield_corridor_length ahead × ±yield_corridor_halfwidth) makes the
+        # robot STOP and hold until the mover has passed (debounced both ways).
+        # Stopping beats the security sidestep for people/moving obstacles: an
+        # escape manoeuvre could step INTO the person's path. Checked BEFORE the
+        # security escape so it takes precedence for anything moving.
+        self.declare_parameter('yield_enable',               True)
+        self.declare_parameter('yield_corridor_length',      2.5)   # m ahead
+        self.declare_parameter('yield_corridor_halfwidth',   0.7)   # m lateral
+        self.declare_parameter('yield_lookahead_sec',        1.5)   # predict movers this far
+        self.declare_parameter('yield_engage_cycles',        2)     # debounce in
+        self.declare_parameter('yield_clear_cycles',         8)     # debounce out (~0.8 s @10 Hz)
+
+        # ── Perception blind-stop (safety) ───────────────────────────────────
+        # lidar_max_age_sec only downgrades to "hold the last cloud"; if the
+        # obstacle feed stays silent past lidar_blind_stop_sec (or never arrived)
+        # the MPC must NOT keep walking toward the goal with no obstacle data —
+        # hard stop until the feed recovers. 0 disables (not recommended on-robot).
+        self.declare_parameter('lidar_blind_stop_sec',       2.5)
 
         # ── Goal handling / safety state machine (issue #5) ──────────────────
         # The MPC tracks the GLOBAL goal directly (not just the A* path tail) so
@@ -289,6 +326,10 @@ class MPCNode(Node):
                 poly_degree   = int(self.get_parameter('mpcc_poly_degree').value),
                 max_iter      = int(self.get_parameter('mpc_max_iter').value),
                 warm_start    = bool(self.get_parameter('mpc_warm_start').value),
+                tol             = float(self.get_parameter('mpc_ipopt_tol').value),
+                acceptable_tol  = float(self.get_parameter('mpc_ipopt_acceptable_tol').value),
+                acceptable_iter = int(self.get_parameter('mpc_ipopt_acceptable_iter').value),
+                max_cpu_time    = float(self.get_parameter('mpc_max_cpu_time').value),
             )
             self._tracker = MPCCTracker(config=ccfg)
             self._cfg = ccfg
@@ -321,6 +362,10 @@ class MPCNode(Node):
                 obs_check_radius    = float(self.get_parameter('mpc_obs_check_radius').value),
                 max_iter      = int(self.get_parameter('mpc_max_iter').value),
                 warm_start    = bool(self.get_parameter('mpc_warm_start').value),
+                tol             = float(self.get_parameter('mpc_ipopt_tol').value),
+                acceptable_tol  = float(self.get_parameter('mpc_ipopt_acceptable_tol').value),
+                acceptable_iter = int(self.get_parameter('mpc_ipopt_acceptable_iter').value),
+                max_cpu_time    = float(self.get_parameter('mpc_max_cpu_time').value),
             )
             self._tracker = MPCTracker(config=cfg)
             self._cfg = cfg
@@ -335,6 +380,20 @@ class MPCNode(Node):
         self._security_mode: bool = False
         self._security_engage_count: int = 0
         self._security_clear_count: int = 0
+
+        # ── Dynamic-obstacle yield state ──────────────────────────────
+        self._yield_enable = bool(self.get_parameter('yield_enable').value)
+        self._yield_len = float(self.get_parameter('yield_corridor_length').value)
+        self._yield_halfwidth = float(self.get_parameter('yield_corridor_halfwidth').value)
+        self._yield_lookahead = float(self.get_parameter('yield_lookahead_sec').value)
+        self._yield_engage_cycles = int(self.get_parameter('yield_engage_cycles').value)
+        self._yield_clear_cycles = int(self.get_parameter('yield_clear_cycles').value)
+        self._yield_active: bool = False
+        self._yield_engage_count: int = 0
+        self._yield_clear_count: int = 0
+
+        # ── Perception blind-stop ─────────────────────────────────────
+        self._lidar_blind_stop_sec = float(self.get_parameter('lidar_blind_stop_sec').value)
 
         self._max_lidar_range     = float(self.get_parameter('max_lidar_range').value)
         self._lookahead_dist      = float(self.get_parameter('mpc_lookahead_dist').value)
@@ -741,6 +800,23 @@ class MPCNode(Node):
         if n == 0:
             return np.empty(0, dtype=np.int64), 0
         cells = np.floor(obs_2d / cell).astype(np.int64)
+
+        if _NDIMAGE_OK:
+            # Vectorised path: rasterise occupied cells into a dense local patch
+            # (bounded by the obstacle window, e.g. 16 m / 0.3 m ≈ 54×54) and let
+            # scipy label 8-connected components in C. The previous union-find
+            # looped over every POINT in Python — 5-15k iterations per solve at
+            # 10 Hz on the dense voxel cloud.
+            mins = cells.min(axis=0)
+            dims = cells.max(axis=0) - mins + 1
+            local = cells - mins
+            occ = np.zeros(dims, dtype=bool)
+            occ[local[:, 0], local[:, 1]] = True
+            comp, n_comp = _ndimage.label(occ, structure=np.ones((3, 3), dtype=bool))
+            labels = comp[local[:, 0], local[:, 1]].astype(np.int64) - 1
+            return labels, int(n_comp)
+
+        # Fallback: union-find over occupied cells (8-connectivity).
         cell_of_pt = {}
         occupied = {}
         for i in range(n):
@@ -748,7 +824,6 @@ class MPCNode(Node):
             cell_of_pt[i] = key
             occupied.setdefault(key, []).append(i)
 
-        # Union-find over occupied cells (8-connectivity).
         parent = {k: k for k in occupied}
 
         def find(a):
@@ -820,9 +895,12 @@ class MPCNode(Node):
             return predicted
 
         labels, n_clusters = self._cluster_points(obs_2d, self._obs_cluster_cell)
-        centroids = np.zeros((n_clusters, 2), dtype=float)
-        for c in range(n_clusters):
-            centroids[c] = obs_2d[labels == c].mean(axis=0)
+        counts = np.bincount(labels, minlength=n_clusters).astype(float)
+        counts[counts == 0] = 1.0   # scipy labels are dense, but stay safe
+        centroids = np.stack([
+            np.bincount(labels, weights=obs_2d[:, 0], minlength=n_clusters),
+            np.bincount(labels, weights=obs_2d[:, 1], minlength=n_clusters),
+        ], axis=1) / counts[:, None]
 
         cluster_vel = np.zeros((n_clusters, 2), dtype=float)      # CONFIRMED dynamic
         cluster_vel_raw = np.zeros((n_clusters, 2), dtype=float)  # this-frame estimate
@@ -866,6 +944,48 @@ class MPCNode(Node):
         self._track_centroids = centroids
         self._track_vel = cluster_vel
         return predicted
+
+    # ── Dynamic-obstacle yield (stop until the mover has passed) ───────
+
+    @staticmethod
+    def _dynamic_cluster_in_corridor(
+        robot_xy: np.ndarray,
+        robot_yaw: float,
+        centroids: Optional[np.ndarray],
+        vels: Optional[np.ndarray],
+        length: float,
+        halfwidth: float,
+        lookahead_sec: float,
+        n_samples: int = 4,
+    ) -> bool:
+        """True if a CONFIRMED-dynamic cluster is in (or will enter) the corridor.
+
+        The corridor is a body-frame rectangle ahead of the robot:
+        forward ∈ (-0.2, length], |lateral| <= halfwidth. Each dynamic cluster
+        (velocity non-zero after the tracker's temporal-consistency gate) is
+        tested at its current centroid AND at constant-velocity extrapolations up
+        to lookahead_sec, so someone about to CROSS the path triggers the yield
+        before they are physically in front of the robot. Pure function of its
+        arguments — no node state — so it is unit-testable off-robot.
+        """
+        if centroids is None or vels is None or len(centroids) == 0:
+            return False
+        speeds = np.hypot(vels[:, 0], vels[:, 1])
+        dyn = speeds > 0.0
+        if not dyn.any():
+            return False
+        c_pos = centroids[dyn]
+        c_vel = vels[dyn]
+        cy, sy = math.cos(robot_yaw), math.sin(robot_yaw)
+        for t in np.linspace(0.0, max(lookahead_sec, 0.0), max(n_samples, 1)):
+            pos = c_pos + c_vel * t
+            dx = pos[:, 0] - robot_xy[0]
+            dy = pos[:, 1] - robot_xy[1]
+            fwd = dx * cy + dy * sy
+            lat = -dx * sy + dy * cy
+            if np.any((fwd > -0.2) & (fwd <= length) & (np.abs(lat) <= halfwidth)):
+                return True
+        return False
 
     # ── Security check + escape (grid-free) ────────────────────────────
 
@@ -1181,25 +1301,37 @@ class MPCNode(Node):
             self._publish_state()
             return
 
-        if self._goal_xy is not None and self._nav_state != 'SECURITY':
+        if self._goal_xy is not None and self._nav_state not in ('SECURITY', 'YIELD'):
             self._nav_state = 'NAVIGATING'
 
-        # ── LiDAR staleness check (#6) ────────────────────────────────
+        # ── LiDAR staleness check (#6) + blind-stop (safety) ──────────
+        # Age is measured from the LAST message on the obstacle topic. Between
+        # lidar_max_age_sec and lidar_blind_stop_sec we keep planning against the
+        # last cloud (odom-frame static structure stays valid — strictly safer
+        # than the old behaviour of dropping ALL obstacles and planning blind).
+        # Past lidar_blind_stop_sec (or if no cloud ever arrived) → hard stop:
+        # never walk toward a goal with no obstacle data.
         obs_2d: Optional[np.ndarray] = None
-        scan_age_sec = 0.0
-        if self._lidar_points is not None and len(self._lidar_points) > 0:
-            if self._last_scan_stamp is not None:
-                now_ros   = self.get_clock().now()
-                scan_age_sec = (
-                    now_ros - self._last_scan_stamp
-                ).nanoseconds * 1e-9
+        scan_age_sec = float('inf')
+        if self._last_scan_stamp is not None:
+            scan_age_sec = (
+                self.get_clock().now() - self._last_scan_stamp
+            ).nanoseconds * 1e-9
 
-            if scan_age_sec <= self._lidar_max_age_sec:
-                obs_2d = self._lidar_points[:, :2]
-            else:
+        if self._lidar_blind_stop_sec > 0.0 and scan_age_sec > self._lidar_blind_stop_sec:
+            self._set_state('STOPPED')
+            self._publish_stop(
+                f'obstacle feed lost ({scan_age_sec:.1f}s > '
+                f'{self._lidar_blind_stop_sec:.1f}s) — refusing to navigate blind')
+            self._publish_state()
+            return
+
+        if self._lidar_points is not None and len(self._lidar_points) > 0:
+            obs_2d = self._lidar_points[:, :2]
+            if scan_age_sec > self._lidar_max_age_sec:
                 self.get_logger().warn(
                     f'[MPC] LiDAR scan stale ({scan_age_sec*1e3:.0f} ms > '
-                    f'{self._lidar_max_age_sec*1e3:.0f} ms) — skipping obstacles',
+                    f'{self._lidar_max_age_sec*1e3:.0f} ms) — holding last cloud',
                     throttle_duration_sec=1.0,
                 )
 
@@ -1254,6 +1386,41 @@ class MPCNode(Node):
                 f'{len(self._lidar_points) if self._lidar_points is not None else 0})',
                 throttle_duration_sec=0.5,
             )
+
+        # ── Dynamic-obstacle YIELD (safety): stop until the mover passes ──
+        # Uses the tracker's CONFIRMED-dynamic clusters (_track_centroids /
+        # _track_vel, updated by _predict_obs_positions above). Debounced both
+        # ways so a single-frame velocity blip neither trips nor clears it.
+        # Takes precedence over the security escape: sidestepping around a
+        # PERSON could step into their path — stopping is the safe reaction.
+        if self._yield_enable:
+            in_corridor = self._dynamic_cluster_in_corridor(
+                robot_xy_now, self._yaw,
+                self._track_centroids, self._track_vel,
+                self._yield_len, self._yield_halfwidth, self._yield_lookahead)
+            if in_corridor:
+                self._yield_engage_count += 1
+                self._yield_clear_count = 0
+                if self._yield_engage_count >= self._yield_engage_cycles:
+                    self._yield_active = True
+            else:
+                self._yield_engage_count = 0
+                if self._yield_active:
+                    self._yield_clear_count += 1
+                    if self._yield_clear_count >= self._yield_clear_cycles:
+                        self._yield_active = False
+                        self._set_state('NAVIGATING')
+            if self._yield_active:
+                self._set_state('YIELD')
+                # Drop the warm start / setpoint filter so the post-yield replan
+                # restarts cleanly from standstill.
+                self._tracker._prev_u = None
+                self._tracker._prev_x = None
+                self._setpoint_filtered_xy = None
+                self._setpoint_filtered_yaw = None
+                self._publish_stop('dynamic obstacle in path — yielding until clear')
+                self._publish_state()
+                return
 
         # ── Security protocol (grid-free, debounced — issue #1) ───────
         prev_security = self._security_mode

@@ -87,6 +87,22 @@ class MPCCConfig:
     max_iter: int = 80
     warm_start: bool = True
     print_level: int = 0
+    # Control-grade termination (issue: IPOPT's defaults solve to 1e-8 KKT
+    # tolerance — far beyond what a 10 Hz velocity command can use — so every
+    # solve burned iterations polishing digits the robot never sees).
+    # acceptable_* lets IPOPT return early once the solution is "good enough
+    # for control" for a few consecutive iterations; max_cpu_time hard-bounds
+    # the worst case below the solve period so one slow solve can never stall
+    # the control loop (a timed-out solve reports failure → soft-hold path).
+    tol: float = 1e-3
+    acceptable_tol: float = 1e-2
+    acceptable_iter: int = 3
+    # Hang guard, NOT a per-cycle budget: must stay well above a COLD solve on
+    # the slowest target (Orin Nano ≈ 3-5× the dev host, cold ≈ 150 ms there).
+    # Benchmarked: an 80 ms wall made every recovery solve time out → permanent
+    # failure cascade. It only exists to stop a pathological multi-second solve
+    # from freezing the control loop (the soft-hold path absorbs the miss).
+    max_cpu_time: float = 0.3
 
 
 @dataclass
@@ -428,7 +444,15 @@ class MPCCTracker:
             'print_level': cfg.print_level,
             'sb': 'yes',
             'warm_start_init_point': 'yes' if cfg.warm_start else 'no',
+            'tol': cfg.tol,
+            'acceptable_tol': cfg.acceptable_tol,
+            'acceptable_iter': cfg.acceptable_iter,
+            'max_cpu_time': cfg.max_cpu_time,
         }
+        # NOTE: warm-start mu_init / bound-push overrides were benchmarked and
+        # REJECTED — they slow cold/recovery solves on this NLP (31.9 vs
+        # 24.8 ms mean) and interact badly with a CPU wall. Termination
+        # tolerances alone give the speedup with 100% solve success.
         opti.solver('ipopt', p_opts, s_opts)
 
         self._opti = opti

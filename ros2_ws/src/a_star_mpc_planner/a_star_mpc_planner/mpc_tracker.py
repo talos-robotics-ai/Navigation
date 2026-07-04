@@ -96,6 +96,12 @@ class MPCConfig:
     max_iter:   int  = 100
     warm_start: bool = True
     print_level: int = 0
+    # Control-grade termination — see MPCCConfig for rationale. Defaults match
+    # the MPCC tracker so both modes share the same solve-time budget.
+    tol: float = 1e-3
+    acceptable_tol: float = 1e-2
+    acceptable_iter: int = 3
+    max_cpu_time: float = 0.3   # hang guard, not a budget — see MPCCConfig
 
 
 # ============================================================
@@ -374,7 +380,13 @@ class MPCTracker:
             'print_level':           cfg.print_level,
             'sb':                    'yes',
             'warm_start_init_point': 'yes' if cfg.warm_start else 'no',
+            'tol':                   cfg.tol,
+            'acceptable_tol':        cfg.acceptable_tol,
+            'acceptable_iter':       cfg.acceptable_iter,
+            'max_cpu_time':          cfg.max_cpu_time,
         }
+        # warm-start mu_init / bound-push overrides benchmarked and rejected —
+        # see the note in MPCCTracker._build_nlp.
         opti.solver('ipopt', p_opts, s_opts)
 
         self._opti      = opti

@@ -18,8 +18,8 @@ Run (inside the ROS 2 / localization container, after DLIO + g1_local_map are up
     ros2 launch a_star_mpc_planner planner.launch.py amo_host:=127.0.0.1 amo_port:=8766
 
 The whole stack runs on ROS_DOMAIN_ID=42 to match real_localization.launch.py and
-isolate it from the ROS 2 Jazzy host (see docs/DLIO_G1_MID360_TUNING.md and the
-QoS/transport notes in docs/LOCAL_VOXEL_MAP.md).
+isolate it from the ROS 2 Jazzy host (see docs/perception/DLIO_G1_MID360_TUNING.md and the
+QoS/transport notes in docs/perception/LOCAL_VOXEL_MAP.md).
 """
 import os
 

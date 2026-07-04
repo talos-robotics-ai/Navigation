@@ -1,0 +1,84 @@
+site_name: G1 Navigation
+site_description: Learned nonlinear MPC navigation on the Unitree G1 humanoid — DLIO perception, A*+MPCC planning, RL-gait locomotion.
+site_url: https://relo02.github.io/Navigation/
+repo_url: https://github.com/Relo02/Navigation
+repo_name: Relo02/Navigation
+docs_dir: docs
+# The repo README is the site landing page; docs/ holds the topic pages.
+use_directory_urls: true
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.instant
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - search.suggest
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        # Render ```mermaid fenced blocks as diagrams.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search
+
+# Grouped by macro-topic — mirrors docs/README.md.
+nav:
+  - Home: README.md
+  - Perception:
+      - Overview - Local voxel map: perception/LOCAL_VOXEL_MAP.md
+      - Ground segmentation: perception/GROUND_SEGMENTATION.md
+      - Ground removal (superseded plan): perception/GROUND_REMOVAL_PLAN.md
+      - DLIO deployment & testing: perception/DLIO_DEPLOYMENT_TESTING.md
+      - DLIO G1 + MID-360 tuning: perception/DLIO_G1_MID360_TUNING.md
+      - DLIO map save/load: perception/DLIO_MAP_SAVE_LOAD.md
+  - Planning & Control:
+      - A* + MPC planner: planning/A_STAR_MPC_PLANNER.md
+      - MPCC (contouring MPC): planning/MPCC_CONTOURING_MPC.md
+      - Dynamic obstacle avoidance: planning/DYNAMIC_OBSTACLE_AVOIDANCE.md
+      - Distributed nav & optimization: planning/DISTRIBUTED_NAV_PLAN.md
+  - Locomotion:
+      - SONIC real bring-up: locomotion/SONIC_REAL_BRINGUP.md
+      - SONIC policy: locomotion/SONIC_POLICY.md
+      - Unitree native gait: locomotion/UNITREE_GAIT.md
+      - AMO inference plan: locomotion/amo_inference_plan.md
+  - Autonomy:
+      - Agentic LLM navigation: autonomy/AGENTIC_LLM_NAV.md
+  - System:
+      - Architecture: system/system_architecture.md
+      - Building on the Jetson: system/BUILDING.md
+      - Docker images: system/dockerfiles.md
+      - Simulation stack: system/simulation_stack.md

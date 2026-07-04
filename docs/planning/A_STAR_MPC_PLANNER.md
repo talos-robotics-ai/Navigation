@@ -12,8 +12,8 @@ Launch: `a_star_mpc_planner/planner.launch.py`.
 
 This planner was ported from the older `G1_navigation` (FAST-LIO) stack and
 re-adapted to this repo's DLIO front-end. See
-[system_architecture.md](system_architecture.md) for where it sits in the whole
-loop and [LOCAL_VOXEL_MAP.md](LOCAL_VOXEL_MAP.md) for the obstacle source it
+[system_architecture.md](../system/system_architecture.md) for where it sits in the whole
+loop and [LOCAL_VOXEL_MAP.md](../perception/LOCAL_VOXEL_MAP.md) for the obstacle source it
 consumes.
 
 ---
@@ -107,6 +107,27 @@ sensor (`dlio_map_z_above`) before adding them as obstacles. Off by default:
 > the *local* costmap injects phantom/ghost obstacles that grow over the run and
 > make A\* detour around free space. Long-horizon memory belongs in a dedicated
 > **global planner on a drift-corrected global costmap**, not this raw fusion.
+
+### Global+local fusion (quality-gated) — `global_fusion_mode`
+This is the **drift-tolerant** alternative to raw DLIO-map fusion above, and the
+answer to "fuse the global map once it is well constructed." The
+`global_planner_node` publishes its **confirmed** obstacle cells on
+`/global_planner/known_obstacles` — hit-thresholded (≥ N observations),
+decay-faded, breadcrumb-carved, and crucially **pre-inflation**. `a_star_node`
+fuses them into the local costmap as direct obstacles:
+
+- `off` — never fuse (carrot-following only).
+- `on` — fuse whenever the global layer publishes.
+- `auto` (default) — fuse only once the global map is **mature** (≥
+  `global_fusion_min_cells` confirmed cells), so early sparse knowledge never
+  pollutes the clean local map.
+
+Cells within `global_fusion_min_range` (3 m) of the robot are **never** fused —
+the live local map owns the near field, so a stale global cell can re-route the
+robot but can never freeze it in place. Fusing the *pre-inflation* cells (the
+local costmap applies its own inflation) is what avoids the double-inflation that
+closes doorways. See
+[DISTRIBUTED_NAV_PLAN.md](DISTRIBUTED_NAV_PLAN.md) §9.
 
 ---
 
@@ -271,4 +292,4 @@ the ROS 2 / `localization` image. Build the workspace in-container (`build_ws`).
 - AMO log: `command source: websocket :8766` and `connected to AMO WebSocket`
   from the bridge ⇒ velocity is reaching the gait.
 - Verify clouds/paths in **RViz**, not `ros2 topic hz` from the host (a fresh CLI
-  participant can't pull the large clouds — see [LOCAL_VOXEL_MAP.md](LOCAL_VOXEL_MAP.md) §6).
+  participant can't pull the large clouds — see [LOCAL_VOXEL_MAP.md](../perception/LOCAL_VOXEL_MAP.md) §6).

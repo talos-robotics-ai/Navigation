@@ -7,7 +7,7 @@
 # controller (g1_deploy_onnx_ref) runs separately and SUBs a ZMQ socket. So what
 # this script starts is the ROS 2 -> SONIC BRIDGE (cmd_vel_to_sonic_node), which
 # PUBs planner commands to that controller over ZMQ :5556. It runs in the
-# localization image (which has the built workspace). See docs/SONIC_POLICY.md.
+# localization image (which has the built workspace). See docs/locomotion/SONIC_POLICY.md.
 #
 # The bridge converts the MPC's BODY-frame /mpc/cmd_vel into SONIC's WORLD-frame
 # movement/facing using measured DLIO yaw (closed loop) — the only thing it does

@@ -11,7 +11,7 @@ together. It runs the 50 Hz control loop:
 so the joints never snap to the policy reference at activation — they S-curve
 blend from the captured posture while PD gains ramp soft→full, and an always-on
 slew filter keeps commanded joints converging smoothly instead of tracking the
-policy instantaneously. See docs/amo_inference_plan.md.
+policy instantaneously. See docs/locomotion/amo_inference_plan.md.
 
 Run (inside the amo_policy container)::
 

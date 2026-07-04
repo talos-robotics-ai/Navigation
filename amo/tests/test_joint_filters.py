@@ -1,5 +1,5 @@
 """
-Unit tests for the AMO joint-smoothing filters (docs/amo_inference_plan.md).
+Unit tests for the AMO joint-smoothing filters (docs/locomotion/amo_inference_plan.md).
 
 Pure numpy — no robot, no robojudo. Run from the amo/ dir:
 

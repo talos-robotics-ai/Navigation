@@ -145,7 +145,18 @@ In testing, an obstacle placed on the path makes MPCC **halt short of it** (prog
 
 CasADi `Opti` + IPOPT, built once and cached; all per-solve data (state, obstacles, path coefficients, velocity limits) enters as **parameters**. Warm-started from the previous solution (shifted one step); a forward-progress cold guess seeds `θ` linearly and `vθ = vθ_max` after failures. (Code: `solve()` [`mpcc_tracker.py:398-491`](../ros2_ws/src/a_star_mpc_planner/a_star_mpc_planner/mpcc_tracker.py#L398-L491); `_cold_guess` [493-511](../ros2_ws/src/a_star_mpc_planner/a_star_mpc_planner/mpcc_tracker.py#L493-L511).)
 
-Measured: **≈26 ms / solve at `N=50`** on the dev machine — within the 10 Hz (`mpc_rate_hz`) budget. The MPCC NLP is heavier than the tracking MPC (7 states / 4 controls vs 6 / 3), so watch `solve_ms` in `/mpc/diagnostics` and reduce `mpc_N` or `mpcc_poly_degree` if it approaches `1000/mpc_rate_hz` ms.
+Measured: **p50 ≈23 ms / solve at `N=50`** on the dev machine — within the 10 Hz (`mpc_rate_hz`) budget. The MPCC NLP is heavier than the tracking MPC (7 states / 4 controls vs 6 / 3), so watch `solve_ms` in `/mpc/diagnostics` and reduce `mpc_N` or `mpcc_poly_degree` if it approaches `1000/mpc_rate_hz` ms.
+
+> **Control-grade termination (2026-07-04).** IPOPT's default KKT tolerance is
+> `1e-8` — far finer than a 10 Hz velocity command can use. Setting `tol=1e-3`
+> plus early-accept (`acceptable_tol`/`acceptable_iter`) returns as soon as the
+> solution is control-accurate: **p50 32 → 23 ms, p95 halved, 100 % solve
+> success** on the deployed problem. `max_cpu_time` (0.3 s) is a **hang guard,
+> not a per-cycle budget** — it must stay well above a cold solve on the Orin
+> Nano (~150 ms); an 80 ms wall was benchmarked and cascaded into permanent
+> failure. Warm-start `mu_init`/bound-push overrides were also tried and
+> rejected (slower recovery solves). See
+> [DISTRIBUTED_NAV_PLAN.md](DISTRIBUTED_NAV_PLAN.md) §9.
 
 ---
 

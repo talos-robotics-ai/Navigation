@@ -142,7 +142,7 @@ Both sides must share `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` and the same
 `ROS_DOMAIN_ID`. The G1 is unactuated until you drive its joints — feed it the
 locomotion/AMO policy the same way as on the robot; DLIO localizes off the
 LiDAR + IMU regardless. DLIO needs the robot **stationary for the first ~3 s**
-(IMU + gravity calibration). Full details: [`sim/README.md`](../sim/README.md).
+(IMU + gravity calibration). Full details: [`sim/README.md`](../../sim/README.md).
 
 ---
 

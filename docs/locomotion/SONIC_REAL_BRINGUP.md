@@ -8,7 +8,7 @@ the Jetson** (no Docker) — the build set up by `setup_jetson.sh`.
 > as safety-critical. First feet-down tests happen on a hoist with the hardware
 > E-stop in hand.
 >
-> Prerequisites: the workspace builds ([BUILDING.md](BUILDING.md)), and the SONIC
+> Prerequisites: the workspace builds ([BUILDING.md](../system/BUILDING.md)), and the SONIC
 > deploy runtime (`g1_deploy_onnx_ref`) is built and sim-validated
 > ([SONIC_POLICY.md](SONIC_POLICY.md)). This doc is the *real-robot* counterpart
 > of the SONIC repo's own `docs/bringup.md` (which covers sim + the SONIC side).
@@ -267,5 +267,5 @@ cd ~/Navigation/ros2_ws && GAIT=sonic ./autonomy.sh               # e-stop: s=ST
 ```
 
 Related: [SONIC_POLICY.md](SONIC_POLICY.md) (integration + sim), [UNITREE_GAIT.md](UNITREE_GAIT.md)
-(gait selection), [BUILDING.md](BUILDING.md) (Jetson build), and the SONIC repo's
+(gait selection), [BUILDING.md](../system/BUILDING.md) (Jetson build), and the SONIC repo's
 `docs/bringup.md` (the controller side).

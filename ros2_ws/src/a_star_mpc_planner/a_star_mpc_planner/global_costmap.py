@@ -164,6 +164,24 @@ class GlobalCostmap:
         gmap[self._free] = 0.0
         self.gmap = gmap
 
+    def confirmed_hit_points(self) -> np.ndarray | None:
+        """(K, 2) world xy of CONFIRMED obstacle cell centres — pre-inflation.
+
+        Confirmed = hit-count ≥ hit_threshold and not breadcrumb-free: the same
+        anti-ghost gate build() rasterises, but WITHOUT the robot-radius
+        inflation. This is the layer the local planner fuses (global+local
+        fusion mode): raw cells fuse cleanly because the local costmap applies
+        its own inflation — fusing the inflated grid would double-inflate and
+        close doorways.
+        """
+        if not self._origin_set:
+            return None
+        occupied = (self._occ >= self.hit_threshold) & (~self._free)
+        idx = np.argwhere(occupied)
+        if idx.size == 0:
+            return None
+        return (idx.astype(np.float64) + 0.5) * self.reso + np.array([self.minx, self.miny])
+
     # ------------------------------------------------------------------
     # Coordinate helpers (match FixedGaussianGridMap)
     # ------------------------------------------------------------------
