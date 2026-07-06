@@ -16,8 +16,11 @@ LAPTOP_IP="${LAPTOP_IP:?set LAPTOP_IP=<laptop wifi ip>  (e.g. LAPTOP_IP=10.251.1
 HOLD_ARMS="${HOLD_ARMS:-true}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"; cd "$HERE"
+# ROS/colcon setup scripts reference unset vars — disable nounset around BOTH sources.
+set +u
 source /opt/ros/humble/setup.bash
-set +u; source install/setup.bash; set -u
+source install/setup.bash
+set -u
 export ROS_DOMAIN_ID=42
 NAV=(taskset -c "${NAV_CPUS:-0,1}")
 
