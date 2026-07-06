@@ -30,25 +30,20 @@ if [[ -z "$WIFI_IP" ]]; then
     exit 1
 fi
 
-# CycloneDDS config for the bridge so it DISCOVERS the local nav nodes reliably:
-#  - bind the WiFi NIC only (keeps DDS off the robot-eth link enP8p1s0),
-#  - ParticipantIndex=none: the nav stack already claims the low well-known indices,
-#    so the bridge takes an ephemeral one instead of failing "no free participant index",
-#  - unicast Peer to the Jetson's own IP finds the local nav nodes even if they run
-#    multicast-off; AllowMulticast=false because the AP blocks it anyway.
+# CycloneDDS config for the bridge so it DISCOVERS the local nav nodes. The nav stack
+# runs DEFAULT DDS (on-host multicast, ephemeral participant index), so the bridge must
+# match: keep multicast ON (loopback multicast is on-host, NOT blocked by the AP) and
+# use ParticipantIndex=none so we don't collide with / get capped by the well-known
+# index scheme the nav stack fills. NO interface binding / NO unicast peer — that
+# would only see WiFi-pinned nodes and miss default-DDS ones (the common case).
 CFG="$(mktemp /tmp/cyclonedds_foxglove.XXXXXX.xml)"
 cat > "$CFG" <<EOF
 <?xml version='1.0' encoding='UTF-8' ?>
 <CycloneDDS xmlns='https://cdds.io/config'>
   <Domain id='any'>
-    <General>
-      <NetworkInterfaceAddress>${WIFI_IP}</NetworkInterfaceAddress>
-      <AllowMulticast>false</AllowMulticast>
-    </General>
     <Discovery>
       <ParticipantIndex>none</ParticipantIndex>
       <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>
-      <Peers><Peer address='${WIFI_IP}'/></Peers>
     </Discovery>
   </Domain>
 </CycloneDDS>
