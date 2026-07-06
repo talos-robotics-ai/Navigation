@@ -81,4 +81,5 @@ nav:
       - Architecture: system/system_architecture.md
       - Building on the Jetson: system/BUILDING.md
       - Docker images: system/dockerfiles.md
+      - Remote visualization (Foxglove): system/REMOTE_VISUALIZATION.md
       - Simulation stack: system/simulation_stack.md

@@ -1,27 +1,29 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<!-- Jetson-side CycloneDDS config for remote RViz over WiFi (no ethernet).
-     Pins DDS to the Jetson's WiFi IP so it advertises a routable locator
-     (host-net docker otherwise picks docker0/Livox NIC), and adds the
-     laptop as an explicit unicast peer since enterprise APs block multicast.
-     Mounted into the localization container at /workspace/config via
-     docker-compose's ./config volume. Update the addresses if DHCP changes them. -->
-<CycloneDDS xmlns="https://cdds.io/config"
-            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
-  <Domain Id="any">
+<!-- OPTIONAL: pins the Jetson nav nodes' DDS to the WiFi NIC. Only needed for the
+     (not recommended) native-RViz-over-DDS path; the reliable remote-viz path is
+     Foxglove — see docs/system/REMOTE_VISUALIZATION.md.
+
+     Humble's CycloneDDS IGNORES the newer <General><Interfaces><NetworkInterface>
+     block, so we must use the deprecated <NetworkInterfaceAddress> to bind a single
+     NIC. Without this, every node also advertises the unroutable robot-eth locator
+     (192.168.123.x), which poisons endpoint (SEDP) matching from a remote laptop.
+     Multicast is off (campus AP blocks it); a unicast Peer reaches the laptop.
+
+     Addresses are environment-specific (DHCP) — update to match your network:
+       - NetworkInterfaceAddress = this Jetson's WiFi IP
+       - Peer address           = the laptop's WiFi IP
+     Use with: CYCLONEDDS_URI=file://<path>/cyclonedds_jetson.xml on every nav terminal.
+     A side benefit: it keeps nav DDS off enP8p1s0, freeing the robot link for the
+     SONIC controller's LowState. -->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
     <General>
-      <Interfaces>
-        <!-- Bind to the Jetson WiFi interface by its IP (robust to iface naming) -->
-        <NetworkInterface address="10.251.101.176" priority="default" multicast="default" />
-      </Interfaces>
-      <AllowMulticast>spdp</AllowMulticast>
+      <NetworkInterfaceAddress>10.251.101.176</NetworkInterfaceAddress>
+      <AllowMulticast>false</AllowMulticast>
     </General>
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>
-      <Peers>
-        <!-- Laptop running RViz -->
-        <Peer address="10.251.100.88"/>
-      </Peers>
+      <Peers><Peer address="10.251.100.88"/></Peers>
     </Discovery>
   </Domain>
 </CycloneDDS>

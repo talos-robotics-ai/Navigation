@@ -52,4 +52,5 @@ The RL gaits that consume `cmd_vel` and drive the robot's joints.
 | [system/system_architecture.md](system/system_architecture.md) | End-to-end stack (LiDAR → DLIO → MPC → gait) |
 | [system/BUILDING.md](system/BUILDING.md) | Building `ros2_ws` on the Jetson — what to rebuild, the `LIVOX_SDK2_ROOT` rule |
 | [system/dockerfiles.md](system/dockerfiles.md) | The three-image framework |
+| [system/REMOTE_VISUALIZATION.md](system/REMOTE_VISUALIZATION.md) | **Remote viz on a laptop over WiFi via Foxglove** (no ethernet); why native RViz-over-DDS fails |
 | [system/simulation_stack.md](system/simulation_stack.md) | Wrapping the stack into Isaac Sim |
