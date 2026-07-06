@@ -66,7 +66,7 @@ UNITREE_LOCO_FSM="${UNITREE_LOCO_FSM:-501}"
 if ! python3 -c 'import unitree_sdk2py, cyclonedds' >/dev/null 2>&1; then
     echo "error: the Unitree Python SDK / cyclonedds are not installed in the host Python." >&2
     echo "Install once, then re-run:" >&2
-    echo "    export CYCLONEDDS_HOME=/opt/ros/humble" >&2
+    echo "    export CYCLONEDDS_HOME=/usr/local   # has lib/libddsc.so + headers on this Jetson" >&2
     echo "    pip3 install cyclonedds" >&2
     echo "    pip3 install git+https://github.com/unitreerobotics/unitree_sdk2_python.git" >&2
     exit 1
