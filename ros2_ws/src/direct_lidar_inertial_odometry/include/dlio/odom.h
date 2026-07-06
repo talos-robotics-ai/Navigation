@@ -73,18 +73,17 @@ private:
   void initializeDLIO();
 
   void getNextPose();
-  // Returns a private COPY of the IMU measurements in [start_time,end_time], taken
-  // under mtx_imu, so callers can integrate without racing callbackImu's push_front
-  // (which invalidates circular_buffer iterators once the buffer wraps).
   bool imuMeasFromTimeRange(double start_time, double end_time,
-                            std::vector<ImuMeas>& imu_meas);
+                            boost::circular_buffer<ImuMeas>::reverse_iterator& begin_imu_it,
+                            boost::circular_buffer<ImuMeas>::reverse_iterator& end_imu_it);
   std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f>>
     integrateImu(double start_time, Eigen::Quaternionf q_init, Eigen::Vector3f p_init, Eigen::Vector3f v_init,
                  const std::vector<double>& sorted_timestamps);
   std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f>>
     integrateImuInternal(Eigen::Quaternionf q_init, Eigen::Vector3f p_init, Eigen::Vector3f v_init,
                          const std::vector<double>& sorted_timestamps,
-                         const std::vector<ImuMeas>& imu_meas);
+                         boost::circular_buffer<ImuMeas>::reverse_iterator begin_imu_it,
+                         boost::circular_buffer<ImuMeas>::reverse_iterator end_imu_it);
   void propagateGICP();
 
   void propagateState();

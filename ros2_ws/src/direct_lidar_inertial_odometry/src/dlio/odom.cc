@@ -1065,18 +1065,12 @@ void dlio::OdomNode::getNextPose() {
 }
 
 bool dlio::OdomNode::imuMeasFromTimeRange(double start_time, double end_time,
-                                          std::vector<ImuMeas>& imu_meas) {
-
-  // Hold mtx_imu for the ENTIRE read. imu_buffer is written by callbackImu on another
-  // thread (push_front), which invalidates circular_buffer iterators once the buffer is
-  // full (~25 s at 200 Hz / 5000-deep). The old code released the lock after the wait
-  // and then iterated + integrated UNLOCKED -> use-after-free / torn ImuMeas reads
-  // (NaN transforms) that surfaced as heap corruption. We copy the needed slice out
-  // under the lock; callers integrate over that private copy.
-  std::unique_lock<decltype(this->mtx_imu)> lock(this->mtx_imu);
+                                          boost::circular_buffer<ImuMeas>::reverse_iterator& begin_imu_it,
+                                          boost::circular_buffer<ImuMeas>::reverse_iterator& end_imu_it) {
 
   if (this->imu_buffer.empty() || this->imu_buffer.front().stamp < end_time) {
     // Wait for the latest IMU data
+    std::unique_lock<decltype(this->mtx_imu)> lock(this->mtx_imu);
     this->cv_imu_stamp.wait(lock, [this, &end_time]{ return this->imu_buffer.front().stamp >= end_time; });
   }
 
@@ -1099,10 +1093,9 @@ bool dlio::OdomNode::imuMeasFromTimeRange(double start_time, double end_time,
   }
   imu_it++;
 
-  // Reverse iterators iterate forward in time; copy that range out under the lock.
-  auto begin_it = boost::circular_buffer<ImuMeas>::reverse_iterator(imu_it);
-  auto end_it   = boost::circular_buffer<ImuMeas>::reverse_iterator(last_imu_it);
-  imu_meas.assign(begin_it, end_it);
+  // Set reverse iterators (to iterate forward in time)
+  end_imu_it = boost::circular_buffer<ImuMeas>::reverse_iterator(last_imu_it);
+  begin_imu_it = boost::circular_buffer<ImuMeas>::reverse_iterator(imu_it);
 
   return true;
 }
@@ -1118,16 +1111,16 @@ dlio::OdomNode::integrateImu(double start_time, Eigen::Quaternionf q_init, Eigen
     return empty;
   }
 
-  std::vector<ImuMeas> imu_meas;
-  if (this->imuMeasFromTimeRange(start_time, sorted_timestamps.back(), imu_meas) == false
-      || imu_meas.size() < 2) {
+  boost::circular_buffer<ImuMeas>::reverse_iterator begin_imu_it;
+  boost::circular_buffer<ImuMeas>::reverse_iterator end_imu_it;
+  if (this->imuMeasFromTimeRange(start_time, sorted_timestamps.back(), begin_imu_it, end_imu_it) == false) {
     // not enough IMU measurements, return empty vector
     return empty;
   }
 
   // Backwards integration to find pose at first IMU sample
-  const ImuMeas& f1 = imu_meas[0];
-  const ImuMeas& f2 = imu_meas[1];
+  const ImuMeas& f1 = *begin_imu_it;
+  const ImuMeas& f2 = *(begin_imu_it+1);
 
   // Time between first two IMU samples
   double dt = f2.dt;
@@ -1180,35 +1173,34 @@ dlio::OdomNode::integrateImu(double start_time, Eigen::Quaternionf q_init, Eigen
   // Set p_init to position at first IMU sample (go backwards from start_time)
   p_init -= v_init*idt + 0.5*a1*idt*idt + (1/6.)*j*idt*idt*idt;
 
-  return this->integrateImuInternal(q_init, p_init, v_init, sorted_timestamps, imu_meas);
+  return this->integrateImuInternal(q_init, p_init, v_init, sorted_timestamps, begin_imu_it, end_imu_it);
 }
 
 std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f>>
 dlio::OdomNode::integrateImuInternal(Eigen::Quaternionf q_init, Eigen::Vector3f p_init, Eigen::Vector3f v_init,
                                      const std::vector<double>& sorted_timestamps,
-                                     const std::vector<ImuMeas>& imu_meas) {
+                                     boost::circular_buffer<ImuMeas>::reverse_iterator begin_imu_it,
+                                     boost::circular_buffer<ImuMeas>::reverse_iterator end_imu_it) {
 
   std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f>> imu_se3;
-
-  if (imu_meas.size() < 2) {
-    return imu_se3;
-  }
 
   // Initialization
   Eigen::Quaternionf q = q_init;
   Eigen::Vector3f p = p_init;
   Eigen::Vector3f v = v_init;
-  Eigen::Vector3f a = q._transformVector(imu_meas[0].lin_accel);
+  Eigen::Vector3f a = q._transformVector(begin_imu_it->lin_accel);
   a[2] -= this->gravity_;
 
-  // Iterate over IMU measurements and timestamps (private copy; index-based so it can't
-  // race the circular buffer).
+  // Iterate over IMU measurements and timestamps
+  auto prev_imu_it = begin_imu_it;
+  auto imu_it = prev_imu_it + 1;
+
   auto stamp_it = sorted_timestamps.begin();
 
-  for (size_t i = 1; i < imu_meas.size(); i++) {
+  for (; imu_it != end_imu_it; imu_it++) {
 
-    const ImuMeas& f0 = imu_meas[i-1];
-    const ImuMeas& f = imu_meas[i];
+    const ImuMeas& f0 = *prev_imu_it;
+    const ImuMeas& f = *imu_it;
 
     // Time between IMU samples
     double dt = f.dt;
@@ -1273,6 +1265,8 @@ dlio::OdomNode::integrateImuInternal(Eigen::Quaternionf q_init, Eigen::Vector3f 
 
     // Velocity
     v += a0*dt + 0.5*j_dt*dt;
+
+    prev_imu_it = imu_it;
 
   }
 
