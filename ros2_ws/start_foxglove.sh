@@ -65,7 +65,17 @@ export ROS_DOMAIN_ID="$DOMAIN"
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI="file://$CFG"
 
-echo ">> foxglove_bridge on 0.0.0.0:${PORT}  (ROS_DOMAIN_ID=${DOMAIN})"
+# Pin the bridge to the nav cores (0,1) so it can NEVER compete with the SONIC
+# controller's RT cores (2-5). Serialising heavy topics (point clouds) is exactly
+# what starved the controller's LowState thread and dropped the robot. NAV_CPUS=""
+# disables. See docs/system/REMOTE_VISUALIZATION.md.
+NAV_CPUS="${NAV_CPUS:-0,1}"
+TASKSET=()
+if [[ -n "${NAV_CPUS}" ]] && command -v taskset >/dev/null 2>&1; then
+    TASKSET=(taskset -c "${NAV_CPUS}")
+fi
+
+echo ">> foxglove_bridge on 0.0.0.0:${PORT}  (ROS_DOMAIN_ID=${DOMAIN}${NAV_CPUS:+, CPUs ${NAV_CPUS}})"
 echo ">> On the laptop, open Foxglove Studio and connect to:  ws://${WIFI_IP}:${PORT}"
 echo ">> (Ctrl-C to stop.)"
-exec ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:="${PORT}" address:=0.0.0.0
+exec "${TASKSET[@]}" ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:="${PORT}" address:=0.0.0.0

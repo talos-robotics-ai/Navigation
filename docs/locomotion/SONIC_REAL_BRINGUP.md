@@ -233,6 +233,47 @@ On its own exit the bridge sends IDLE then `command{stop=1}` to the controller.
 
 ---
 
+## 6a. CPU isolation — prevent LowState starvation (falls)
+
+The Orin Nano has **6 cores**. The SONIC controller pins its RT threads to cores
+**2,3,4,5** (`SONIC_CPU_*` in the SONIC repo's `scripts/env.sh`); its main thread —
+which services the **LowState** DDS receive from the robot — sits on **CPU 0**
+(`SONIC_CPU_MAIN=0`). If the nav stack, DDS, or remote viz saturate cores 0–1, that
+LowState thread starves and the controller trips:
+
+```
+[ERROR] Lost LowState data connection from robot!
+[ERROR] Safety check failed, stopping control.
+```
+→ it stops writing `rt/lowcmd` → **the robot falls.** This is *not* a cable fault
+(`ping 192.168.123.161` stays 0% loss); it is CPU contention. It happened once with
+the full nav stack + a Foxglove bridge feeding a laptop subscribed to `/livox/lidar`.
+
+**The fix — keep the controller's cores exclusively for the controller:**
+
+1. **Move the controller's LowState/main thread off the shared core.** Start it with
+   `SONIC_CPU_MAIN=2` (co-locates with the light `INPUT` thread on the isolated set,
+   freeing cores 0,1 entirely):
+   ```bash
+   SONIC_CPU_MAIN=2 scripts/start_deploy_real.sh
+   ```
+2. **Pin everything else to cores 0,1.** `autonomy.sh` and `ros2_ws/start_foxglove.sh`
+   do this automatically (`taskset -c 0,1`, override/disable with `NAV_CPUS`). Nothing
+   the nav side runs touches cores 2–5.
+3. **(Robust, needs a reboot) Hard-isolate the controller cores** so even kernel/IRQ
+   work stays off them. Add to the Jetson boot args (`/boot/extlinux/extlinux.conf`,
+   append to the `APPEND` line): `isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5`, then
+   `sudo reboot`. Verify with `cat /sys/devices/system/cpu/isolated` → `2-5`. The
+   controller's explicit affinity still binds it to 2–5; the general scheduler no
+   longer will.
+
+!!! tip "Still keep heavy viz off during balance"
+    Pinning bounds the damage but cores 0,1 are finite. While the controller is
+    balancing, don't stream raw `/livox/lidar` / point clouds to Foxglove — subscribe
+    to light topics only. See [Remote visualization](../system/REMOTE_VISUALIZATION.md).
+
+---
+
 ## 7. Troubleshooting
 
 | symptom | check / fix |
@@ -258,10 +299,11 @@ On its own exit the bridge sends IDLE then `command{stop=1}` to the controller.
 sudo bash -c "sync; echo 3 > /proc/sys/vm/drop_caches"
 pkill -9 -f "[g]1_deploy_onnx_ref" 2>/dev/null || true
 
-# term 1 — SONIC controller FIRST (robot HOISTED)
-cd ~/groot/sonic-g1-locomotion && scripts/start_deploy_real.sh    # wait for "Init Done"
+# term 1 — SONIC controller FIRST (robot HOISTED). SONIC_CPU_MAIN=2 frees cores 0,1
+# for the nav stack so it can't starve LowState -> fall (see §6a).
+cd ~/groot/sonic-g1-locomotion && SONIC_CPU_MAIN=2 scripts/start_deploy_real.sh   # wait "Init Done"
 
-# term 2 — localization + planner + SONIC bridge + e-stop, one command (robot STILL ~3 s)
+# term 2 — localization + planner + SONIC bridge + e-stop (auto-pinned to cores 0,1)
 cd ~/Navigation/ros2_ws && GAIT=sonic ./autonomy.sh               # e-stop: s=STOP g=GO q=quit
 
 # then: RViz "2D Goal Pose" -> /global_goal

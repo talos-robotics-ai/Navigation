@@ -66,6 +66,22 @@ PLANNER_DELAY="${PLANNER_DELAY:-3}"
 USE_RVIZ="${USE_RVIZ:-1}"
 if [[ "${USE_RVIZ}" == "0" ]]; then RVIZ_ARG="rviz:=false"; else RVIZ_ARG="rviz:=true"; fi
 
+# ── CPU isolation from the SONIC controller ──────────────────────────────────
+# On the 6-core Orin Nano the SONIC controller pins its RT threads to cores 2-5.
+# If the nav stack (+ DDS + any remote viz) competes for those cores it can starve
+# the controller's 500 Hz loop / LowState DDS thread -> "Lost LowState data
+# connection" -> safety-stop -> the robot FALLS (this happened once). So pin every
+# process THIS script starts to the nav cores 0,1 only. Pair it with starting the
+# controller as  SONIC_CPU_MAIN=2 scripts/start_deploy_real.sh  (moves its main/
+# LowState thread off core 0 onto the isolated set), and optionally isolcpus=2-5 at
+# boot. See docs/locomotion/SONIC_REAL_BRINGUP.md §6a. NAV_CPUS="" disables pinning.
+NAV_CPUS="${NAV_CPUS:-0,1}"
+TASKSET=()
+if [[ -n "${NAV_CPUS}" ]] && command -v taskset >/dev/null 2>&1; then
+    TASKSET=(taskset -c "${NAV_CPUS}")
+    echo ">> pinning nav stack to CPUs ${NAV_CPUS} (keeps cores 2-5 free for the SONIC controller)"
+fi
+
 # Which gait consumes /mpc/cmd_vel (forwarded to planner.launch.py). The bridge
 # for the selected gait is launched as part of the planner below; the reminder
 # printed later depends on it (the SONIC/Unitree gaits need a process this script
@@ -125,9 +141,9 @@ run_launch() {
     # (which reads stdin for its SPACE pause) would steal the s/g/q keystrokes
     # meant for the e-stop, making the safety stop unreliable.
     if [[ "${LOG_TO_CONSOLE}" == "1" ]]; then
-        "$@" < /dev/null > >(tee -a "${logfile}") 2>&1 &
+        "${TASKSET[@]}" "$@" < /dev/null > >(tee -a "${logfile}") 2>&1 &
     else
-        "$@" < /dev/null > "${logfile}" 2>&1 &
+        "${TASKSET[@]}" "$@" < /dev/null > "${logfile}" 2>&1 &
     fi
     pids+=($!)
 }
@@ -215,6 +231,6 @@ if [[ "${DISABLE_ESTOP_KEYS:-0}" == "1" ]]; then
     wait -n 2>/dev/null || wait
 else
     echo ">> SAFETY E-STOP active in THIS terminal:  s=stop  g=go  q=quit"
-    ros2 run g1_sim_bridge estop_keyboard_node
+    "${TASKSET[@]}" ros2 run g1_sim_bridge estop_keyboard_node
 fi
 cleanup
