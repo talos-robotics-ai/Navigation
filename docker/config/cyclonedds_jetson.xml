@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Jetson-side CycloneDDS config for remote RViz over WiFi (no ethernet).
+     Pins DDS to the Jetson's WiFi IP so it advertises a routable locator
+     (host-net docker otherwise picks docker0/Livox NIC), and adds the
+     laptop as an explicit unicast peer since enterprise APs block multicast.
+     Mounted into the localization container at /workspace/config via
+     docker-compose's ./config volume. Update the addresses if DHCP changes them. -->
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <!-- Bind to the Jetson WiFi interface by its IP (robust to iface naming) -->
+        <NetworkInterface address="10.251.101.176" priority="default" multicast="default" />
+      </Interfaces>
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <Peers>
+        <!-- Laptop running RViz -->
+        <Peer address="10.251.100.88"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>
