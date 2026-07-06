@@ -4,9 +4,16 @@ Plan for splitting the navigation stack so that **perception/odometry runs on th
 Jetson** and **global+local planning (A*+MPC) runs on an off-board computer**, with
 reference velocities returned to the robot over ZMQ.
 
-> **Status:** proposal. Read the "Do you actually need this?" section first — as of
-> 2026-07-03 the Jetson has ~65% idle CPU once the Livox-driver leak is fixed, so
-> this is an *optional* architecture change, not a fix for a real-time problem.
+> **Status:** Variant A **implemented** (2026-07-06) — transport (`zmq_ros_bridge.py`)
+> + run scripts (`run_distributed_nav_jetson.sh`, `run_distributed_nav_laptop.sh`).
+> See [§10 runbook](#10-implemented--sequential-runbook).
+>
+> **Why it's now worth doing (updated):** it stopped being just a dev-speed nicety.
+> A diverging DLIO pose made `a_star` allocate a grid around a ~1e20 world coordinate
+> → **4.7 GB → OOM → the whole Jetson thrashed → the SONIC control loop starved → the
+> robot fell.** Moving A*/MPC off-board takes the OOM-prone planner *off the robot*
+> entirely, so a bad odom can never again exhaust the Jetson's RAM and drop it. (Still
+> add the `a_star` pose-clamp regardless — defence in depth.)
 
 ---
 
@@ -279,3 +286,52 @@ Tests: `g1_local_map/test/test_voxel_accumulator.py` (equivalence vs the old
 dict implementation) and `a_star_mpc_planner/test/test_yield_corridor.py`
 (corridor geometry + clustering-partition equivalence); full suites pass
 (53/53).
+
+---
+
+## 10. Implemented — sequential runbook
+
+Variant A: **DLIO + local map + SONIC on the Jetson; A\* + MPC on the laptop**, joined
+by `ros2_ws/zmq_ros_bridge.py` (serializes ROS msgs over ZMQ — no DDS on the WiFi).
+
+**Pieces**
+- `ros2_ws/zmq_ros_bridge.py` — generic ROS↔ZMQ relay (`--send`/`--recv` topic:type maps).
+- `ros2_ws/run_distributed_nav_jetson.sh` — Jetson: localization + SONIC gait bridge + relay + e-stop.
+- `ros2_ws/run_distributed_nav_laptop.sh` — laptop: A\* + MPC + relay inside a Humble container.
+
+**Ports:** Jetson PUB `:5601` (odom/TF/obstacles → laptop), laptop PUB `:5602` (cmd_vel → Jetson).
+
+**One-time (laptop):** the laptop is Jazzy, so the planner runs in a **Humble container**
+(`osrf/ros:humble-desktop`, already pulled). `run_distributed_nav_laptop.sh` builds
+`a_star_mpc_planner` in it on first run (installs casadi/pyzmq/scipy; `install/` persists
+via the bind mount). The planner uses **only standard messages** — no custom-msg build.
+
+**Run order (each session):**
+```bash
+# 0. Jetson — SONIC controller FIRST (its own terminal; robot hoisted, e-stop in hand)
+cd ~/groot/sonic-g1-locomotion
+SONIC_CPU_MAIN=2 taskset -c 2-5 scripts/start_deploy_real.sh   # wait "Init Done"
+
+# 1. Jetson — perception + gait bridge + relay + e-stop (this terminal owns s/g/q)
+cd ~/Navigation/ros2_ws
+LAPTOP_IP=10.251.100.88 ./run_distributed_nav_jetson.sh
+
+# 2. Laptop — A* + MPC + relay (Humble container)
+cd <repo>/ros2_ws
+JETSON_IP=10.251.101.176 ./run_distributed_nav_laptop.sh
+
+# 3. Laptop — Foxglove connected to ws://<jetson>:8765; Publish a Pose on /global_goal
+```
+
+**Verify (per §7):** on the laptop, `ros2 topic hz /dlio/odom_node/odom` and
+`/local_voxel_map/obstacles` match the Jetson's rate; `tf2_echo odom base_link` works;
+`/mpc/cmd_vel` publishes on a goal; **pull the WiFi mid-walk → the robot stops** (the
+`cmd_vel_to_sonic` watchdog zeros the command). The e-stop stays on the Jetson terminal.
+
+**Notes / TODO**
+- First cut ships the obstacle **PointCloud2**; swap to the 2D costmap grid
+  (`Float32MultiArray` via A\*'s external-costmap hook) to cut bandwidth (§3 optimization).
+- Bake a derived Humble image with casadi/scipy/pyzmq so the container starts instantly
+  (the script installs them per first-run today).
+- Still add the `a_star` pose-clamp (reject odom beyond a few hundred metres) as
+  defence-in-depth even off-board.
