@@ -22,11 +22,14 @@
       <AllowMulticast>false</AllowMulticast>
     </General>
     <Discovery>
-      <!-- 'none' = ephemeral participant ports (uncapped). 'auto' caps the host at
-           ~10 participants/domain (MaxAutoParticipantIndex default) and the nav stack
-           has more than that, so 'auto' makes later nodes fail
-           "no free participant index" -> planner/bridge die. Keep 'none'. -->
-      <ParticipantIndex>none</ParticipantIndex>
+      <!-- 'auto' is required for local discovery when multicast is off (nodes find
+           each other by probing well-known ports 0..MaxAutoParticipantIndex on the
+           host). Its default cap is ~10 participants/domain, which the nav stack
+           exceeds -> later nodes fail "no free participant index" and the planner/
+           bridge die. So keep 'auto' but RAISE the cap. (Do NOT use 'none' here: it
+           removes the cap but also disables the well-known-port probing, so with
+           multicast off the nav nodes wouldn't discover each other.) -->
+      <ParticipantIndex>auto</ParticipantIndex>
       <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>
       <Peers><Peer address="10.251.100.88"/></Peers>
     </Discovery>
