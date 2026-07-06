@@ -73,6 +73,10 @@ sudo bash -c "sync; echo 3 > /proc/sys/vm/drop_caches"
 # make sure no stale controller is holding the GPU / robot link
 pkill -9 -f "[g]1_deploy_onnx_ref" 2>/dev/null || true
 
+# SONIC deploy env: env.sh defaults GR00T_DIR to $HOME/GR00T-WholeBodyControl, but on
+# this Jetson it lives under groot/ — set it (add to ~/.bashrc to make it permanent):
+export GR00T_DIR=$HOME/groot/GR00T-WholeBodyControl
+
 # ROS side: load ROS + workspace + LIVOX_SDK2_ROOT in every ROS terminal
 source nav_env            # (or: source /opt/ros/humble/setup.bash && source ~/Navigation/ros2_ws/install/setup.bash)
 export ROS_DOMAIN_ID=42   # nav_env sets 0 by default — the stack REQUIRES 42
@@ -101,7 +105,12 @@ and let it settle.
 ```bash
 # terminal 1  (in the SONIC deploy repo)
 cd ~/groot/sonic-g1-locomotion
-tmux new-session -d -s sdeploy "scripts/start_deploy_real.sh > /tmp/sonic_deploy_real.log 2>&1"
+export GR00T_DIR=$HOME/groot/GR00T-WholeBodyControl   # env.sh's default path is wrong on this Jetson
+# taskset -c 2-5 confines ALL of the controller's threads — including the CycloneDDS
+# LowState receive threads (recvUC/dq.*), which SONIC_CPU_MAIN does NOT pin — to the
+# RT cores, so the nav stack (on 0,1) can't starve LowState -> fall. SONIC_CPU_MAIN=2
+# keeps the main thread inside that set. See §6a.
+tmux new-session -d -s sdeploy "SONIC_CPU_MAIN=2 taskset -c 2-5 scripts/start_deploy_real.sh > /tmp/sonic_deploy_real.log 2>&1"
 until grep -qE "Init Done|out of memory" /tmp/sonic_deploy_real.log; do sleep 2; done
 grep "\[RT\]" /tmp/sonic_deploy_real.log     # expect FIFO+pin lines for all 4 workers
 ```
@@ -236,10 +245,16 @@ On its own exit the bridge sends IDLE then `command{stop=1}` to the controller.
 ## 6a. CPU isolation — prevent LowState starvation (falls)
 
 The Orin Nano has **6 cores**. The SONIC controller pins its RT threads to cores
-**2,3,4,5** (`SONIC_CPU_*` in the SONIC repo's `scripts/env.sh`); its main thread —
-which services the **LowState** DDS receive from the robot — sits on **CPU 0**
-(`SONIC_CPU_MAIN=0`). If the nav stack, DDS, or remote viz saturate cores 0–1, that
-LowState thread starves and the controller trips:
+**2,3,4,5** (`SONIC_CPU_*` in the SONIC repo's `scripts/env.sh`) — but **only** those
+four RT threads. Two other sets of threads are **not** pinned by `SONIC_CPU_*`:
+
+- the **main thread** (`SONIC_CPU_MAIN`, default **0**), and
+- the **CycloneDDS worker threads** (`recvUC`, `recv`, `dq.builtins`, `rlsnr`, …) that
+  actually **deliver LowState** from the robot — these float on the general pool
+  (observed on CPUs 0 and 1).
+
+So if the nav stack / DDS / remote viz saturate cores 0–1, the LowState receive
+threads starve and the controller trips:
 
 ```
 [ERROR] Lost LowState data connection from robot!
@@ -251,26 +266,34 @@ the full nav stack + a Foxglove bridge feeding a laptop subscribed to `/livox/li
 
 **The fix — keep the controller's cores exclusively for the controller:**
 
-1. **Move the controller's LowState/main thread off the shared core.** Start it with
-   `SONIC_CPU_MAIN=2` (co-locates with the light `INPUT` thread on the isolated set,
-   freeing cores 0,1 entirely):
+1. **Confine the *whole* controller (RT loop + main + DDS/LowState threads) to cores
+   2–5** by starting it under `taskset -c 2-5`, with `SONIC_CPU_MAIN=2` so the main
+   thread stays inside that set. `taskset` sets the process affinity mask; the RT
+   threads still pin to their own cores (2–5, inside the mask) while the unpinned
+   DDS/main threads inherit the mask instead of floating onto 0,1:
    ```bash
-   SONIC_CPU_MAIN=2 scripts/start_deploy_real.sh
+   SONIC_CPU_MAIN=2 taskset -c 2-5 scripts/start_deploy_real.sh
    ```
+   (`SONIC_CPU_MAIN=2` alone is **not** enough — it leaves the DDS/LowState threads on
+   0,1. `taskset -c 2-5` is what moves them off.)
 2. **Pin everything else to cores 0,1.** `autonomy.sh` and `ros2_ws/start_foxglove.sh`
    do this automatically (`taskset -c 0,1`, override/disable with `NAV_CPUS`). Nothing
    the nav side runs touches cores 2–5.
 3. **(Robust, needs a reboot) Hard-isolate the controller cores** so even kernel/IRQ
    work stays off them. Add to the Jetson boot args (`/boot/extlinux/extlinux.conf`,
    append to the `APPEND` line): `isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5`, then
-   `sudo reboot`. Verify with `cat /sys/devices/system/cpu/isolated` → `2-5`. The
-   controller's explicit affinity still binds it to 2–5; the general scheduler no
-   longer will.
+   `sudo reboot`. Verify with `cat /sys/devices/system/cpu/isolated` → `2-5`.
 
-!!! tip "Still keep heavy viz off during balance"
-    Pinning bounds the damage but cores 0,1 are finite. While the controller is
-    balancing, don't stream raw `/livox/lidar` / point clouds to Foxglove — subscribe
-    to light topics only. See [Remote visualization](../system/REMOTE_VISUALIZATION.md).
+Verify the isolation on a running controller (all threads should show PSR 2–5):
+```bash
+ps -L -o tid,psr,comm -p "$(pgrep -f '[g]1_deploy_onnx_ref')"
+```
+
+!!! tip "Heavy viz is safer now, but still be conservative"
+    With `taskset -c 2-5` the LowState threads no longer share cores with the nav
+    stack, so remote viz is far safer. Cores 0,1 are still finite, though — while
+    balancing, prefer light Foxglove topics over raw `/livox/lidar` / point clouds.
+    See [Remote visualization](../system/REMOTE_VISUALIZATION.md).
 
 ---
 
@@ -299,9 +322,11 @@ the full nav stack + a Foxglove bridge feeding a laptop subscribed to `/livox/li
 sudo bash -c "sync; echo 3 > /proc/sys/vm/drop_caches"
 pkill -9 -f "[g]1_deploy_onnx_ref" 2>/dev/null || true
 
-# term 1 — SONIC controller FIRST (robot HOISTED). SONIC_CPU_MAIN=2 frees cores 0,1
-# for the nav stack so it can't starve LowState -> fall (see §6a).
-cd ~/groot/sonic-g1-locomotion && SONIC_CPU_MAIN=2 scripts/start_deploy_real.sh   # wait "Init Done"
+# term 1 — SONIC controller FIRST (robot HOISTED). taskset -c 2-5 keeps ALL its
+# threads (incl. DDS/LowState) off the nav cores 0,1 so it can't be starved -> fall (§6a).
+cd ~/groot/sonic-g1-locomotion
+export GR00T_DIR=$HOME/groot/GR00T-WholeBodyControl
+SONIC_CPU_MAIN=2 taskset -c 2-5 scripts/start_deploy_real.sh                      # wait "Init Done"
 
 # term 2 — localization + planner + SONIC bridge + e-stop (auto-pinned to cores 0,1)
 cd ~/Navigation/ros2_ws && GAIT=sonic ./autonomy.sh               # e-stop: s=STOP g=GO q=quit

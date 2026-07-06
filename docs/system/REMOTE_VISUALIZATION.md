@@ -11,11 +11,12 @@ the network. A single `foxglove_bridge` node on the Jetson serves everything ove
     DDS thread** → `Lost LowState data connection` → safety-stop → **the robot falls**
     (this actually happened during bring-up: Foxglove Studio subscribed to `/livox/lidar`
     + point clouds, load hit ~3.7, and the controller lost LowState ~20 s later).
-    `start_foxglove.sh` now **pins the bridge to cores 0,1** (`taskset`) so it can't
-    touch the controller's RT cores 2–5, and the controller should be started with
-    `SONIC_CPU_MAIN=2` (see [SONIC bring-up §6a](../locomotion/SONIC_REAL_BRINGUP.md#6a-cpu-isolation-prevent-lowstate-starvation-falls)).
-    That bounds the risk but does not remove it — Foxglove only streams topics a
-    **connected client subscribes to**, so also:
+    `start_foxglove.sh` **pins the bridge to cores 0,1** (`taskset`) so it can't touch
+    the controller's RT cores 2–5, and the controller must be started under
+    `SONIC_CPU_MAIN=2 taskset -c 2-5` so its **DDS/LowState threads** live on 2–5 too
+    (see [SONIC bring-up §6a](../locomotion/SONIC_REAL_BRINGUP.md#6a-cpu-isolation-prevent-lowstate-starvation-falls)).
+    With both in place viz is much safer, but cores 0,1 are still finite — Foxglove
+    only streams topics a **connected client subscribes to**, so also:
 
     - Prefer remote viz when the robot is **not** under active balance control
       (perception/mapping/planner debugging, robot hoisted & limp, or controller off).
