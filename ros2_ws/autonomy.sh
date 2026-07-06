@@ -86,6 +86,10 @@ fi
 # for the selected gait is launched as part of the planner below; the reminder
 # printed later depends on it (the SONIC/Unitree gaits need a process this script
 # does NOT start).
+# Pin the SONIC upper body to a neutral standing pose so the arms stay still instead
+# of swinging with the policy's gait (gait:=sonic only). HOLD_ARMS=1 ./autonomy.sh
+HOLD_ARMS="${HOLD_ARMS:-false}"
+[[ "${HOLD_ARMS}" == "1" ]] && HOLD_ARMS=true
 GAIT="${GAIT:-amo}"
 case "${GAIT}" in
     amo)     GAIT_NOTE="Start the AMO gait:  AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh" ;;
@@ -169,7 +173,7 @@ fi
 
 echo ">> [2/2] A*+MPC planner (gait:=${GAIT}, its cmd_vel bridge) ..."
 echo ">>       logs -> ${PLANNER_LOG}"
-run_launch "${PLANNER_LOG}" ros2 launch a_star_mpc_planner planner.launch.py gait:=${GAIT}
+run_launch "${PLANNER_LOG}" ros2 launch a_star_mpc_planner planner.launch.py gait:=${GAIT} hold_arms:=${HOLD_ARMS}
 
 # ── Auto-record a ROS bag for troubleshooting ────────────────────────────────
 # Every autonomy run captures the nav topics to a timestamped bag (shares TS with
