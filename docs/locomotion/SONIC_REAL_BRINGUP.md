@@ -105,12 +105,14 @@ and let it settle.
 ```bash
 # terminal 1  (in the SONIC deploy repo)
 cd ~/groot/sonic-g1-locomotion
-export GR00T_DIR=$HOME/groot/GR00T-WholeBodyControl   # env.sh's default path is wrong on this Jetson
-# taskset -c 2-5 confines ALL of the controller's threads — including the CycloneDDS
-# LowState receive threads (recvUC/dq.*), which SONIC_CPU_MAIN does NOT pin — to the
-# RT cores, so the nav stack (on 0,1) can't starve LowState -> fall. SONIC_CPU_MAIN=2
-# keeps the main thread inside that set. See §6a.
-tmux new-session -d -s sdeploy "SONIC_CPU_MAIN=2 taskset -c 2-5 scripts/start_deploy_real.sh > /tmp/sonic_deploy_real.log 2>&1"
+# GR00T_DIR MUST go INSIDE the tmux command: a detached tmux session runs a fresh
+# non-interactive shell that does NOT inherit ad-hoc `export`s or source ~/.bashrc,
+# so `export GR00T_DIR=...` before `tmux new-session` is silently lost (env.sh then
+# uses its wrong default path). taskset -c 2-5 confines ALL of the controller's
+# threads — including the CycloneDDS LowState receive threads (recvUC/dq.*), which
+# SONIC_CPU_MAIN does NOT pin — to the RT cores, so the nav stack (on 0,1) can't
+# starve LowState -> fall. SONIC_CPU_MAIN=2 keeps the main thread in that set. See §6a.
+tmux new-session -d -s sdeploy "GR00T_DIR=\$HOME/groot/GR00T-WholeBodyControl SONIC_CPU_MAIN=2 taskset -c 2-5 scripts/start_deploy_real.sh > /tmp/sonic_deploy_real.log 2>&1"
 until grep -qE "Init Done|out of memory" /tmp/sonic_deploy_real.log; do sleep 2; done
 grep "\[RT\]" /tmp/sonic_deploy_real.log     # expect FIFO+pin lines for all 4 workers
 ```
