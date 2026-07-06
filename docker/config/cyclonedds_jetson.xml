@@ -22,7 +22,12 @@
       <AllowMulticast>false</AllowMulticast>
     </General>
     <Discovery>
-      <ParticipantIndex>auto</ParticipantIndex>
+      <!-- 'none' = ephemeral participant ports (uncapped). 'auto' caps the host at
+           ~10 participants/domain (MaxAutoParticipantIndex default) and the nav stack
+           has more than that, so 'auto' makes later nodes fail
+           "no free participant index" -> planner/bridge die. Keep 'none'. -->
+      <ParticipantIndex>none</ParticipantIndex>
+      <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>
       <Peers><Peer address="10.251.100.88"/></Peers>
     </Discovery>
   </Domain>
