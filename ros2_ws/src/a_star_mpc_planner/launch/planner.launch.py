@@ -50,6 +50,7 @@ def generate_launch_description():
     net_if = LaunchConfiguration('net_if')    # robot NIC for the Unitree native gait
     sonic_host = LaunchConfiguration('sonic_host')
     sonic_port = LaunchConfiguration('sonic_port')
+    hold_arms = LaunchConfiguration('hold_arms')  # pin SONIC upper body (arms still)
 
     common = [params_file, {'use_sim_time': use_sim_time}]
 
@@ -170,6 +171,9 @@ def generate_launch_description():
             'speed_gain': 1.18,
             # `facing` must lead measured heading or the policy never turns.
             'facing_lookahead_sec': 0.4,
+            # Pin the 17-DOF upper body to the neutral standing pose so the arms
+            # stay still instead of swinging with the policy's generated gait.
+            'hold_arms': ParameterValue(hold_arms, value_type=bool),
             'use_sim_time': use_sim_time,
         }],
     )
@@ -219,6 +223,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'sonic_port', default_value='5556',
             description='Port of the SONIC ZMQ PUB socket (gait:=sonic).'),
+        DeclareLaunchArgument(
+            'hold_arms', default_value='false',
+            description='Pin the SONIC upper body to the neutral standing pose so '
+                        'the arms stay still instead of swinging with the policy '
+                        'gait (gait:=sonic). true = arms held.'),
         DeclareLaunchArgument(
             'global_planner', default_value='true',
             description='Run the global planner layer (long-horizon /global_path '

@@ -158,6 +158,7 @@ class CmdVelToSonic(Node):
         self._yaw: float | None = None        # latest measured yaw
         self._yaw0: float | None = None        # anchor (SONIC world-frame origin)
         self._need_anchor = True
+        self._idle_face: float | None = None   # latched heading held while idle
 
         # ── ZMQ sink + start control ─────────────────────────────────────────
         self._pub = SonicPlannerPublisher(host=host, port=port)
@@ -216,12 +217,13 @@ class CmdVelToSonic(Node):
                 self.get_logger().info("E-STOP RELEASED — navigation re-enabled")
 
     def _facing_hold(self):
-        """`facing` unit vector for the current measured heading (no look-ahead),
-        used to hold heading while idle/estopped. Falls back to SONIC's start
-        heading before any odom/anchor is available."""
-        if self._yaw is not None and self._yaw0 is not None:
-            dth = _wrap(self._yaw - self._yaw0)
-            return [math.cos(dth), math.sin(dth), 0.0]
+        """`facing` unit vector that HOLDS heading — latched once so it does NOT
+        chase measured-yaw (DLIO) drift while idle/estopped. Falls back to SONIC's
+        start heading before any odom/anchor is available."""
+        if self._idle_face is None and self._yaw is not None and self._yaw0 is not None:
+            self._idle_face = _wrap(self._yaw - self._yaw0)
+        if self._idle_face is not None:
+            return [math.cos(self._idle_face), math.sin(self._idle_face), 0.0]
         return [1.0, 0.0, 0.0]
 
     def _send_idle(self):
@@ -252,20 +254,37 @@ class CmdVelToSonic(Node):
 
         vx, vy, wz = self._cmd
         dth = _wrap(self._yaw - self._yaw0)
+        speed_mag = math.hypot(vx, vy)
+
+        # No motion command -> HOLD heading. Latch `facing` on entering idle and
+        # re-anchor yaw0 each tick so measured-yaw (DLIO) drift is ABSORBED instead
+        # of turning the torso to chase it. Without this the robot slowly rotates to
+        # follow odom yaw drift while just standing (worst on a hoist, where the yaw
+        # estimate wanders). Reactivation is seamless: dth resumes from the held
+        # angle when a real command arrives.
+        if speed_mag <= _EPS and abs(wz) <= _EPS:
+            if self._idle_face is None:
+                self._idle_face = dth
+            self._yaw0 = _wrap(self._yaw - self._idle_face)
+            facing = [math.cos(self._idle_face), math.sin(self._idle_face), 0.0]
+            self._pub.send_planner(MODE_IDLE, [0.0, 0.0, 0.0], facing,
+                                   speed=-1.0, upper_body=self._upper_body)
+            return
+
+        # Active command -> resume MEASURED-yaw tracking.
+        self._idle_face = None
         c, s = math.cos(dth), math.sin(dth)
         # Body velocity rotated into SONIC's world frame by the MEASURED heading.
         dirx = vx * c - vy * s
         diry = vx * s + vy * c
-        speed_mag = math.hypot(vx, vy)
         if speed_mag > _EPS:
             n = math.hypot(dirx, diry)
             movement = [dirx / n, diry / n, 0.0]
             speed = min(speed_mag * self._speed_gain, self._max_speed)
-            mode = self._mode
-        else:
+        else:  # pure turn in place (wz != 0, no translation)
             movement = [0.0, 0.0, 0.0]
             speed = -1.0
-            mode = self._mode if abs(wz) > _EPS else MODE_IDLE
+        mode = self._mode
         # `facing` leads the measured heading by the commanded turn rate so the
         # policy actually turns; converges to dth as wz -> 0.
         face = dth + wz * self._lookahead

@@ -175,7 +175,12 @@ dlio::OdomNode::OdomNode() : Node("dlio_odom_node") {
 
 }
 
-dlio::OdomNode::~OdomNode() {}
+dlio::OdomNode::~OdomNode() {
+  // Metric/debug threads are now joinable (not detached) — join any in-flight one so
+  // node teardown doesn't std::terminate on a still-joinable thread.
+  if (this->metrics_thread.joinable()) this->metrics_thread.join();
+  if (this->debug_thread.joinable()) this->debug_thread.join();
+}
 
 void dlio::OdomNode::getParams() {
 
@@ -579,15 +584,26 @@ void dlio::OdomNode::preprocessPoints() {
     this->deskew_status = false;
   }
 
+  // Drop non-finite points (NaN/Inf) from a bad IMU-integrated deskew BEFORE the voxel
+  // grid / GICP. PCL's VoxelGrid casts (max-min)/leaf to integer voxel dims, which is
+  // UB on non-finite coords and can smash the heap. removeNaN misses Inf, so filter both.
+  pcl::PointCloud<PointType>::Ptr current_scan_ = std::make_shared<pcl::PointCloud<PointType>>();
+  current_scan_->points.reserve(this->deskewed_scan->points.size());
+  for (const auto& pt : this->deskewed_scan->points) {
+    if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z)) {
+      current_scan_->points.push_back(pt);
+    }
+  }
+  current_scan_->width = current_scan_->points.size();
+  current_scan_->height = 1;
+  current_scan_->is_dense = true;
+
   // Voxel Grid Filter
   if (this->vf_use_) {
-    pcl::PointCloud<PointType>::Ptr current_scan_ = std::make_shared<pcl::PointCloud<PointType>>(*this->deskewed_scan);
     this->voxel.setInputCloud(current_scan_);
     this->voxel.filter(*current_scan_);
-    this->current_scan = current_scan_;
-  } else {
-    this->current_scan = this->deskewed_scan;
   }
+  this->current_scan = current_scan_;
 
 }
 
@@ -760,6 +776,16 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   this->main_loop_running = true;
   lock.unlock();
 
+  // Join the PREVIOUS scan's async metric/debug threads before this scan mutates the
+  // state they read: original_scan is reassigned in getScanFromROS() below, and the
+  // comp_times/trajectory/rate vectors are push_back'd later in this callback. These
+  // threads used to be detached and raced those mutations (non-atomic shared_ptr store
+  // + vector reallocation while another thread iterates) -> use-after-free surfacing as
+  // glibc `free(): invalid next size` after ~50 s. The join is normally a no-op (they
+  // finish in <1 ms, long before the next 100 ms scan).
+  if (this->metrics_thread.joinable()) this->metrics_thread.join();
+  if (this->debug_thread.joinable()) this->debug_thread.join();
+
   double then = this->now().seconds();
 
   if (this->first_scan_stamp == 0.) {
@@ -786,9 +812,9 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
     return;
   }
 
-  // Compute Metrics
+  // Compute Metrics (joined at the top of the NEXT callback so it can't race the
+  // reassignment of original_scan / current_scan or the stats vectors it reads).
   this->metrics_thread = std::thread( &dlio::OdomNode::computeMetrics, this );
-  this->metrics_thread.detach();
 
   // Set Adaptive Parameters
   if (this->adaptive_params_) {
@@ -848,9 +874,9 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   this->comp_times.push_back(this->now().seconds() - then);
   this->gicp_hasConverged = this->gicp.hasConverged();
 
-  // Debug statements and publish custom DLIO message
+  // Debug statements and publish custom DLIO message (joined at the top of the NEXT
+  // callback so it can't race the stats-vector push_backs it iterates).
   this->debug_thread = std::thread( &dlio::OdomNode::debug, this );
-  this->debug_thread.detach();
 
   this->geo.first_opt_done = true;
 
@@ -1422,10 +1448,15 @@ void dlio::OdomNode::computeSpaciousness() {
   // compute range of points
   std::vector<float> ds;
 
-  for (int i = 0; i <= this->original_scan->points.size(); i++) {
+  for (size_t i = 0; i < this->original_scan->points.size(); i++) {   // '<' not '<=': was reading one PointType past the end of the vector
     float d = std::sqrt(pow(this->original_scan->points[i].x, 2) +
                         pow(this->original_scan->points[i].y, 2));
     ds.push_back(d);
+  }
+
+  if (ds.empty()) {
+    this->metrics.spaciousness.push_back(0.f);
+    return;
   }
 
   // median
