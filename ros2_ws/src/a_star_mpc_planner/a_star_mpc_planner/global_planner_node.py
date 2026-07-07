@@ -72,9 +72,27 @@ class GlobalPlannerNode(Node):
         self.declare_parameter('obstacle_cost_weight', 50.0)
         self.declare_parameter('goal_reached_radius', 0.25)
         self.declare_parameter('max_range', 25.0)
+        # T1 — grow the persistent map to the whole scene (cap, then roll).
+        self.declare_parameter('global_max_half_width', 80.0)
+        # T2 — dead-end / stuck memory.
+        self.declare_parameter('global_penalty_decay', 0.985)   # per-build fade
+        self.declare_parameter('global_penalty_max', 4.0)
+        self.declare_parameter('stuck_time_s', 6.0)             # no-progress window -> penalize
+        self.declare_parameter('stuck_progress_eps', 0.30)      # min dist-to-goal gain = progress (m)
+        self.declare_parameter('stuck_penalty_ahead', 1.5)      # stamp this far ahead toward goal (m)
+        self.declare_parameter('stuck_penalty_radius', 1.2)     # penalty disk radius (m)
+        self.declare_parameter('stuck_penalty_amount', 2.0)     # penalty added per stuck event
+        # T3 — re-anchor accumulated memory on a DLIO odom discontinuity.
+        self.declare_parameter('odom_jump_threshold', 0.30)     # per-msg pose step = jump (m)
 
         self._max_range = float(self.get_parameter('max_range').value)
         self._goal_reached_radius = float(self.get_parameter('goal_reached_radius').value)
+        self._stuck_time_s = float(self.get_parameter('stuck_time_s').value)
+        self._stuck_eps = float(self.get_parameter('stuck_progress_eps').value)
+        self._stuck_ahead = float(self.get_parameter('stuck_penalty_ahead').value)
+        self._stuck_radius = float(self.get_parameter('stuck_penalty_radius').value)
+        self._stuck_amount = float(self.get_parameter('stuck_penalty_amount').value)
+        self._jump_threshold = float(self.get_parameter('odom_jump_threshold').value)
 
         self._costmap = GlobalCostmap(
             reso=float(self.get_parameter('global_reso').value),
@@ -84,6 +102,9 @@ class GlobalPlannerNode(Node):
             hit_threshold=float(self.get_parameter('global_hit_threshold').value),
             decay=float(self.get_parameter('global_decay').value),
             free_radius=float(self.get_parameter('global_free_radius').value),
+            max_half_width=float(self.get_parameter('global_max_half_width').value),
+            penalty_decay=float(self.get_parameter('global_penalty_decay').value),
+            penalty_max=float(self.get_parameter('global_penalty_max').value),
         )
         self._planner = AStarPlanner(
             obstacle_threshold=0.5,
@@ -95,6 +116,9 @@ class GlobalPlannerNode(Node):
         self._goal_xy: np.ndarray | None = None
         self._latest_obs: np.ndarray | None = None
         self._frame = 'odom'
+        # T2 stuck tracking (per goal): best distance-to-goal and when it happened.
+        self._goal_best_d: float | None = None
+        self._goal_best_t: float = 0.0
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -136,7 +160,19 @@ class GlobalPlannerNode(Node):
 
     def _odom_cb(self, msg: Odometry):
         self._frame = msg.header.frame_id or 'odom'
-        self._pose_xy = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y])
+        xy = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y])
+        # T3: a per-message pose step larger than a walking robot can make is a DLIO
+        # discontinuity (loop closure) — re-anchor the accumulated map by that delta
+        # so the jump doesn't smear memory into ghost walls.
+        if self._pose_xy is not None and self._costmap.ready:
+            dx = float(xy[0] - self._pose_xy[0])
+            dy = float(xy[1] - self._pose_xy[1])
+            if (dx * dx + dy * dy) ** 0.5 > self._jump_threshold:
+                self._costmap.shift(dx, dy)
+                self.get_logger().warning(
+                    f'[GLOBAL] odom jump {(dx * dx + dy * dy) ** 0.5:.2f} m — re-anchored global map',
+                    throttle_duration_sec=1.0)
+        self._pose_xy = xy
 
     def _obs_cb(self, msg: PointCloud2):
         try:
@@ -149,6 +185,7 @@ class GlobalPlannerNode(Node):
 
     def _goal_cb(self, msg: PoseStamped):
         self._goal_xy = np.array([msg.pose.position.x, msg.pose.position.y])
+        self._goal_best_d = None   # new goal → reset stuck tracking
 
     # ── Global replanning ──────────────────────────────────────────────
 
@@ -163,6 +200,27 @@ class GlobalPlannerNode(Node):
             obs = obs[d < self._max_range]
 
         self._costmap.update(obs, self._pose_xy)
+
+        # T2: dead-end / stuck memory. Track progress toward the goal; if it stalls
+        # for stuck_time_s, stamp a decaying penalty just ahead (toward the goal) so
+        # the global A* below reroutes around the corridor that isn't working. The
+        # penalty is stamped BEFORE build() so it takes effect on this cycle's route.
+        dist_to_goal = float(np.linalg.norm(self._pose_xy - self._goal_xy))
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if self._goal_best_d is None or dist_to_goal < self._goal_best_d - self._stuck_eps:
+            self._goal_best_d = dist_to_goal
+            self._goal_best_t = now
+        elif (now - self._goal_best_t) > self._stuck_time_s:
+            gd = self._goal_xy - self._pose_xy
+            n = float(np.hypot(gd[0], gd[1]))
+            if n > 1e-3:
+                ahead = self._pose_xy + (gd / n) * self._stuck_ahead
+                self._costmap.stamp_penalty(ahead, self._stuck_radius, self._stuck_amount)
+                self.get_logger().warning(
+                    f'[GLOBAL] no progress for {self._stuck_time_s:.0f}s — penalized dead-end ahead, rerouting',
+                    throttle_duration_sec=2.0)
+            self._goal_best_t = now   # reset the window so we don't stamp every cycle
+
         self._costmap.build()
 
         # Publish the global costmap for RViz (row-major: x=col, y=row → transpose).
@@ -187,7 +245,6 @@ class GlobalPlannerNode(Node):
             pts3 = np.column_stack([hits, np.zeros(len(hits))]).astype(np.float32)
             self._known_obs_pub.publish(point_cloud2.create_cloud_xyz32(hdr, pts3))
 
-        dist_to_goal = float(np.linalg.norm(self._pose_xy - self._goal_xy))
         if dist_to_goal <= self._goal_reached_radius:
             return  # at goal — let the local layer's goal-reached stop handle it
 
