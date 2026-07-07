@@ -318,7 +318,7 @@ LAPTOP_IP=10.251.100.88 ./run_distributed_nav_jetson.sh
 
 # 2. Laptop — A* + MPC + relay (Humble container)
 cd <repo>/ros2_ws
-JETSON_IP=10.251.101.176 ./run_distributed_nav_laptop.sh
+JETSON_IP=10.251.101.176 FOXGLOVE=1 ./run_distributed_nav_laptop.sh
 
 # 3. Laptop — Foxglove connected to ws://<jetson>:8765; Publish a Pose on /global_goal
 ```
