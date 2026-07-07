@@ -10,7 +10,7 @@
 #
 # Usage: ./rviz_client.sh          # opens RViz
 #        ./rviz_client.sh topics   # just list discovered topics (connectivity test)
-set -euo pipefail
+set -eo pipefail   # NOT -u: ROS setup scripts reference unbound vars
 
 # Source ONLY the system ROS (Jazzy). Do NOT source ros2_ws/install — it was built
 # for Humble inside the container and is ABI-incompatible with this laptop's Jazzy.

@@ -1,0 +1,21 @@
+# Off-board planner image for the distributed-nav laptop side
+# (docs/planning/DISTRIBUTED_NAV_PLAN.md). HUMBLE to match the Jetson's CDR wire format,
+# with the planner's Python deps baked in so run_distributed_nav_laptop.sh starts fast
+# instead of apt/pip-installing on every ephemeral run.
+#
+# The ros2_ws is bind-mounted at runtime (source + colcon 'install/' live in the mount),
+# so this image carries ONLY the interpreter deps — never the code. Build with no context:
+#   docker build -t dnav-laptop:humble -f Dockerfile.dnav -
+FROM osrf/ros:humble-desktop
+
+# python3-pip for the wheels below. Pin numpy < 2 so the prebuilt ROS Python extensions
+# (rclpy) and the a_star/mpc nodes don't hit the numpy 2.x ABI break — the same trap that
+# bit the Jetson. casadi/scipy would otherwise drag in numpy 2.x transitively.
+# joint-state-publisher: neutral joint angles for the off-board G1 mesh (robot_model.launch.py)
+# — not in ros-humble-desktop. Renders the robot at the relayed odom pose, zero Jetson cost.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-pip ros-humble-joint-state-publisher \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --no-cache-dir "numpy<2" scipy pyzmq casadi
+
+CMD ["bash"]

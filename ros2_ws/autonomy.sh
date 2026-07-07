@@ -66,10 +66,43 @@ PLANNER_DELAY="${PLANNER_DELAY:-3}"
 USE_RVIZ="${USE_RVIZ:-1}"
 if [[ "${USE_RVIZ}" == "0" ]]; then RVIZ_ARG="rviz:=false"; else RVIZ_ARG="rviz:=true"; fi
 
+# ── Off-board / distributed mode (JETSON_IP set) ─────────────────────────────
+# Laptop role in the distributed split (docs/planning/DISTRIBUTED_NAV_PLAN.md): the
+# Jetson runs perception and streams odom/TF/obstacles here over ZMQ
+# (run_distributed_nav_jetson.sh). This host then runs ONLY A*+MPC + RViz + the ZMQ
+# relay — no localization (no lidar here), no local gait bridge (cmd_vel is relayed
+# back to the Jetson's bridge), no CPU pinning (this is not the 6-core Orin). The
+# real safety e-stop stays on the JETSON terminal: the planner nodes don't consume
+# /estop, so a laptop e-stop couldn't stop the robot. Ctrl-C here stops the planner
+# -> cmd_vel stops -> the Jetson bridge's cmd_vel watchdog zeros the gait.
+OFFBOARD=false
+JETSON_IP="${JETSON_IP:-}"
+[[ -n "${JETSON_IP}" ]] && OFFBOARD=true
+
+# ── CPU isolation from the SONIC controller ──────────────────────────────────
+# On the 6-core Orin Nano the SONIC controller pins its RT threads to cores 2-5.
+# If the nav stack (+ DDS + any remote viz) competes for those cores it can starve
+# the controller's 500 Hz loop / LowState DDS thread -> "Lost LowState data
+# connection" -> safety-stop -> the robot FALLS (this happened once). So pin every
+# process THIS script starts to the nav cores 0,1 only. Pair it with starting the
+# controller as  SONIC_CPU_MAIN=2 scripts/start_deploy_real.sh  (moves its main/
+# LowState thread off core 0 onto the isolated set), and optionally isolcpus=2-5 at
+# boot. See docs/locomotion/SONIC_REAL_BRINGUP.md §6a. NAV_CPUS="" disables pinning.
+if $OFFBOARD; then NAV_CPUS="${NAV_CPUS:-}"; else NAV_CPUS="${NAV_CPUS:-0,1}"; fi
+TASKSET=()
+if [[ -n "${NAV_CPUS}" ]] && command -v taskset >/dev/null 2>&1; then
+    TASKSET=(taskset -c "${NAV_CPUS}")
+    echo ">> pinning nav stack to CPUs ${NAV_CPUS} (keeps cores 2-5 free for the SONIC controller)"
+fi
+
 # Which gait consumes /mpc/cmd_vel (forwarded to planner.launch.py). The bridge
 # for the selected gait is launched as part of the planner below; the reminder
 # printed later depends on it (the SONIC/Unitree gaits need a process this script
 # does NOT start).
+# Pin the SONIC upper body to a neutral standing pose so the arms stay still instead
+# of swinging with the policy's gait (gait:=sonic only). HOLD_ARMS=1 ./autonomy.sh
+HOLD_ARMS="${HOLD_ARMS:-false}"
+[[ "${HOLD_ARMS}" == "1" ]] && HOLD_ARMS=true
 GAIT="${GAIT:-amo}"
 case "${GAIT}" in
     amo)     GAIT_NOTE="Start the AMO gait:  AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh" ;;
@@ -125,9 +158,9 @@ run_launch() {
     # (which reads stdin for its SPACE pause) would steal the s/g/q keystrokes
     # meant for the e-stop, making the safety stop unreliable.
     if [[ "${LOG_TO_CONSOLE}" == "1" ]]; then
-        "$@" < /dev/null > >(tee -a "${logfile}") 2>&1 &
+        "${TASKSET[@]}" "$@" < /dev/null > >(tee -a "${logfile}") 2>&1 &
     else
-        "$@" < /dev/null > "${logfile}" 2>&1 &
+        "${TASKSET[@]}" "$@" < /dev/null > "${logfile}" 2>&1 &
     fi
     pids+=($!)
 }
@@ -142,18 +175,55 @@ if pgrep -f livox_ros_driver2_node >/dev/null 2>&1; then
     sleep 1
 fi
 
-echo ">> [1/2] localization (DLIO + g1_local_map) on ROS_DOMAIN_ID=${ROS_DOMAIN_ID} ..."
-echo ">>       logs -> ${LOCALIZATION_LOG}"
-run_launch "${LOCALIZATION_LOG}" ros2 launch g1_bringup real_localization.launch.py "${RVIZ_ARG}"
+if $OFFBOARD; then
+    echo ">> [1/2] OFF-BOARD: ZMQ relay <- Jetson ${JETSON_IP} (odom/TF/obstacles in; /mpc/cmd_vel out) ..."
+    echo ">>       perception runs on the Jetson (run_distributed_nav_jetson.sh). logs -> ${LOCALIZATION_LOG}"
+    # Subscribe to the full g1_dlio.rviz viz set; topics the Jetson doesn't send (e.g.
+    # the heavy clouds unless RELAY_CLOUDS=1) just sit idle at zero cost. cmd_vel goes back.
+    run_launch "${LOCALIZATION_LOG}" python3 "${WS}/zmq_ros_bridge.py" \
+        --recv "/dlio/odom_node/odom:nav_msgs/msg/Odometry,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2,/dlio/odom_node/path:nav_msgs/msg/Path,/local_voxel_map/costmap:nav_msgs/msg/OccupancyGrid,/dlio/odom_node/pointcloud/deskewed:sensor_msgs/msg/PointCloud2,/dlio/map_node/map:sensor_msgs/msg/PointCloud2,/local_voxel_map/voxel_grid:sensor_msgs/msg/PointCloud2" \
+        --sub-connect "tcp://${JETSON_IP}:5601" \
+        --send "/mpc/cmd_vel:geometry_msgs/msg/Twist" \
+        --pub-bind "tcp://*:5602"
+else
+    echo ">> [1/2] localization (DLIO + g1_local_map) on ROS_DOMAIN_ID=${ROS_DOMAIN_ID} ..."
+    echo ">>       logs -> ${LOCALIZATION_LOG}"
+    run_launch "${LOCALIZATION_LOG}" ros2 launch g1_bringup real_localization.launch.py "${RVIZ_ARG}"
+fi
 
-if (( PLANNER_DELAY > 0 )); then
+# Off-board G1 mesh in RViz: robot_state_publisher + joint_state_publisher (neutral
+# joints) + the base_link->pelvis static TF, pinned to the relayed odom->base_link.
+# Runs entirely on the laptop (zero Jetson cost). ROBOT_MODEL=0 to skip. On-board this
+# same block already lives inside real_localization.launch.py (robot_model:=true).
+if $OFFBOARD && [[ "${ROBOT_MODEL:-1}" != "0" ]]; then
+    echo ">>       + G1 robot model (mesh rides the relayed pose; neutral joints) ..."
+    run_launch "${LOG_DIR}/robot_model_${TS}.log" \
+        ros2 launch "${WS}/src/g1_bringup/launch/robot_model.launch.py" use_sim_time:=false
+fi
+
+# DLIO IMU/gravity init only matters when WE run localization; off-board it's already up.
+if ! $OFFBOARD && (( PLANNER_DELAY > 0 )); then
     echo ">> waiting ${PLANNER_DELAY}s for DLIO IMU/gravity init — keep the robot STILL ..."
     sleep "${PLANNER_DELAY}"
 fi
 
-echo ">> [2/2] A*+MPC planner (gait:=${GAIT}, its cmd_vel bridge) ..."
+# Off-board: no local gait bridge (bridge:=false) — /mpc/cmd_vel is relayed back to
+# the Jetson's bridge. On-board: the selected gait's bridge runs here.
+planner_args=("gait:=${GAIT}" "hold_arms:=${HOLD_ARMS}")
+$OFFBOARD && planner_args+=("bridge:=false")
+echo ">> [2/2] A*+MPC planner (${planner_args[*]}) ..."
 echo ">>       logs -> ${PLANNER_LOG}"
-run_launch "${PLANNER_LOG}" ros2 launch a_star_mpc_planner planner.launch.py gait:=${GAIT}
+run_launch "${PLANNER_LOG}" ros2 launch a_star_mpc_planner planner.launch.py "${planner_args[@]}"
+
+# Off-board RViz: the SAME g1_dlio.rviz autonomy.sh uses on-board (SetGoal already bound
+# to /global_goal). Shows the relayed DLIO/costmap/obstacles + the local A*/MPC output.
+# The heavy CloudMap/CloudRegistered displays only fill in when the Jetson runs with
+# RELAY_CLOUDS=1; otherwise they sit empty (harmless). RVIZ_CONFIG overrides the file.
+if $OFFBOARD && { [[ -n "${DISPLAY:-}" ]] || [[ -S /tmp/.X11-unix/X0 ]]; }; then
+    RVIZ_CONFIG="${RVIZ_CONFIG:-${WS}/src/g1_bringup/rviz/g1_dlio.rviz}"
+    echo ">> RViz (${RVIZ_CONFIG##*/}; 2D Goal Pose -> /global_goal) ..."
+    run_launch "${LOG_DIR}/rviz_${TS}.log" rviz2 -d "${RVIZ_CONFIG}"
+fi
 
 # ── Auto-record a ROS bag for troubleshooting ────────────────────────────────
 # Every autonomy run captures the nav topics to a timestamped bag (shares TS with
@@ -210,11 +280,16 @@ fi
 # cmd_vel watchdog both zero it — so a crash stops the robot even before you
 # press q / Ctrl-C here.
 echo ""
-if [[ "${DISABLE_ESTOP_KEYS:-0}" == "1" ]]; then
+if $OFFBOARD; then
+    echo ">> OFF-BOARD: the SAFETY E-STOP is on the JETSON terminal (run_distributed_nav_jetson.sh)."
+    echo ">> Here, Ctrl-C stops the planner -> cmd_vel stops -> the Jetson bridge watchdog zeros the gait."
+    echo ">> Set goals in RViz: '2D Goal Pose' -> /global_goal."
+    wait -n 2>/dev/null || wait
+elif [[ "${DISABLE_ESTOP_KEYS:-0}" == "1" ]]; then
     echo ">> e-stop keys disabled — Ctrl-C stops everything."
     wait -n 2>/dev/null || wait
 else
     echo ">> SAFETY E-STOP active in THIS terminal:  s=stop  g=go  q=quit"
-    ros2 run g1_sim_bridge estop_keyboard_node
+    "${TASKSET[@]}" ros2 run g1_sim_bridge estop_keyboard_node
 fi
 cleanup
