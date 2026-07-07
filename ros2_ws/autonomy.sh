@@ -178,8 +178,10 @@ fi
 if $OFFBOARD; then
     echo ">> [1/2] OFF-BOARD: ZMQ relay <- Jetson ${JETSON_IP} (odom/TF/obstacles in; /mpc/cmd_vel out) ..."
     echo ">>       perception runs on the Jetson (run_distributed_nav_jetson.sh). logs -> ${LOCALIZATION_LOG}"
+    # Subscribe to the full g1_dlio.rviz viz set; topics the Jetson doesn't send (e.g.
+    # the heavy clouds unless RELAY_CLOUDS=1) just sit idle at zero cost. cmd_vel goes back.
     run_launch "${LOCALIZATION_LOG}" python3 "${WS}/zmq_ros_bridge.py" \
-        --recv "/dlio/odom_node/odom:nav_msgs/msg/Odometry,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2" \
+        --recv "/dlio/odom_node/odom:nav_msgs/msg/Odometry,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2,/dlio/odom_node/path:nav_msgs/msg/Path,/local_voxel_map/costmap:nav_msgs/msg/OccupancyGrid,/dlio/odom_node/pointcloud/deskewed:sensor_msgs/msg/PointCloud2,/dlio/map_node/map:sensor_msgs/msg/PointCloud2,/local_voxel_map/voxel_grid:sensor_msgs/msg/PointCloud2" \
         --sub-connect "tcp://${JETSON_IP}:5601" \
         --send "/mpc/cmd_vel:geometry_msgs/msg/Twist" \
         --pub-bind "tcp://*:5602"
@@ -187,6 +189,16 @@ else
     echo ">> [1/2] localization (DLIO + g1_local_map) on ROS_DOMAIN_ID=${ROS_DOMAIN_ID} ..."
     echo ">>       logs -> ${LOCALIZATION_LOG}"
     run_launch "${LOCALIZATION_LOG}" ros2 launch g1_bringup real_localization.launch.py "${RVIZ_ARG}"
+fi
+
+# Off-board G1 mesh in RViz: robot_state_publisher + joint_state_publisher (neutral
+# joints) + the base_link->pelvis static TF, pinned to the relayed odom->base_link.
+# Runs entirely on the laptop (zero Jetson cost). ROBOT_MODEL=0 to skip. On-board this
+# same block already lives inside real_localization.launch.py (robot_model:=true).
+if $OFFBOARD && [[ "${ROBOT_MODEL:-1}" != "0" ]]; then
+    echo ">>       + G1 robot model (mesh rides the relayed pose; neutral joints) ..."
+    run_launch "${LOG_DIR}/robot_model_${TS}.log" \
+        ros2 launch "${WS}/src/g1_bringup/launch/robot_model.launch.py" use_sim_time:=false
 fi
 
 # DLIO IMU/gravity init only matters when WE run localization; off-board it's already up.
@@ -203,10 +215,14 @@ echo ">> [2/2] A*+MPC planner (${planner_args[*]}) ..."
 echo ">>       logs -> ${PLANNER_LOG}"
 run_launch "${PLANNER_LOG}" ros2 launch a_star_mpc_planner planner.launch.py "${planner_args[@]}"
 
-# Off-board RViz: our goal-bound config (SetGoal -> /global_goal) + relayed displays.
+# Off-board RViz: the SAME g1_dlio.rviz autonomy.sh uses on-board (SetGoal already bound
+# to /global_goal). Shows the relayed DLIO/costmap/obstacles + the local A*/MPC output.
+# The heavy CloudMap/CloudRegistered displays only fill in when the Jetson runs with
+# RELAY_CLOUDS=1; otherwise they sit empty (harmless). RVIZ_CONFIG overrides the file.
 if $OFFBOARD && { [[ -n "${DISPLAY:-}" ]] || [[ -S /tmp/.X11-unix/X0 ]]; }; then
-    echo ">> RViz (distributed_nav.rviz; Fixed Frame=odom; 2D Goal Pose -> /global_goal) ..."
-    run_launch "${LOG_DIR}/rviz_${TS}.log" rviz2 -d "${WS}/distributed_nav.rviz"
+    RVIZ_CONFIG="${RVIZ_CONFIG:-${WS}/src/g1_bringup/rviz/g1_dlio.rviz}"
+    echo ">> RViz (${RVIZ_CONFIG##*/}; 2D Goal Pose -> /global_goal) ..."
+    run_launch "${LOG_DIR}/rviz_${TS}.log" rviz2 -d "${RVIZ_CONFIG}"
 fi
 
 # ── Auto-record a ROS bag for troubleshooting ────────────────────────────────
