@@ -181,7 +181,7 @@ if $OFFBOARD; then
     # Subscribe to the full g1_dlio.rviz viz set; topics the Jetson doesn't send (e.g.
     # the heavy clouds unless RELAY_CLOUDS=1) just sit idle at zero cost. cmd_vel goes back.
     run_launch "${LOCALIZATION_LOG}" python3 "${WS}/zmq_ros_bridge.py" \
-        --recv "/dlio/odom_node/odom:nav_msgs/msg/Odometry,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2,/dlio/odom_node/path:nav_msgs/msg/Path,/local_voxel_map/costmap:nav_msgs/msg/OccupancyGrid,/dlio/odom_node/pointcloud/deskewed:sensor_msgs/msg/PointCloud2,/dlio/map_node/map:sensor_msgs/msg/PointCloud2,/local_voxel_map/voxel_grid:sensor_msgs/msg/PointCloud2" \
+        --recv "/dlio/odom_node/odom:nav_msgs/msg/Odometry,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2,/local_voxel_map/costmap:nav_msgs/msg/OccupancyGrid,/dlio/odom_node/pointcloud/deskewed:sensor_msgs/msg/PointCloud2,/dlio/map_node/map:sensor_msgs/msg/PointCloud2,/local_voxel_map/voxel_grid:sensor_msgs/msg/PointCloud2" \
         --sub-connect "tcp://${JETSON_IP}:5601" \
         --send "/mpc/cmd_vel:geometry_msgs/msg/Twist" \
         --pub-bind "tcp://*:5602"
