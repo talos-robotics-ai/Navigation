@@ -51,14 +51,20 @@ tmux new-session -d -s dnav_gaitbridge "${NAV[*]} ros2 run g1_sim_bridge cmd_vel
 # NOT relay /dlio/odom_node/path: DLIO republishes the ENTIRE accumulating trajectory every
 # scan, so it grows without bound and hit ~6 MB/s here — enough to saturate WiFi and starve
 # everything else (and the network softirqs can jitter the controller's LowState thread).
-# RELAY_CLOUDS=1 ALSO ships the HEAVY point clouds (live deskewed scan + accumulated 3D map
-# + voxel grid) — those saturate WiFi too, so OFF by default.
+# RELAY_CLOUDS=1 ships the BOUNDED lidar clouds (live deskewed scan + local voxel grid) so
+# CloudRegistered + LocalVoxelMap show in g1_dlio.rviz — ~2.5 MB/s, WiFi-safe. OFF by default.
+# RELAY_MAP=1 ALSO ships /dlio/map_node/map, which ACCUMULATES without bound (same failure
+# class as the path) and creeps up WiFi over a long run — enable only for a quick look.
 SEND_TOPICS="/dlio/odom_node/odom:nav_msgs/msg/Odometry,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2,/local_voxel_map/costmap:nav_msgs/msg/OccupancyGrid"
 if [ "${RELAY_CLOUDS:-0}" = "1" ]; then
-  echo ">> RELAY_CLOUDS=1: ALSO shipping deskewed scan + 3D map + voxel grid (HEAVY — DLIO may throttle)"
-  SEND_TOPICS="${SEND_TOPICS},/dlio/odom_node/pointcloud/deskewed:sensor_msgs/msg/PointCloud2,/dlio/map_node/map:sensor_msgs/msg/PointCloud2,/local_voxel_map/voxel_grid:sensor_msgs/msg/PointCloud2"
+  echo ">> RELAY_CLOUDS=1: ALSO shipping deskewed scan + voxel grid (~2.5 MB/s)"
+  SEND_TOPICS="${SEND_TOPICS},/dlio/odom_node/pointcloud/deskewed:sensor_msgs/msg/PointCloud2,/local_voxel_map/voxel_grid:sensor_msgs/msg/PointCloud2"
 fi
-echo ">> [3/3] ROS<->ZMQ relay -> laptop ${LAPTOP_IP} (PUB :5601, SUB laptop:5602)  clouds=${RELAY_CLOUDS:-0} ..."
+if [ "${RELAY_MAP:-0}" = "1" ]; then
+  echo ">> RELAY_MAP=1: ALSO shipping the accumulated 3D map (UNBOUNDED — watch WiFi)"
+  SEND_TOPICS="${SEND_TOPICS},/dlio/map_node/map:sensor_msgs/msg/PointCloud2"
+fi
+echo ">> [3/3] ROS<->ZMQ relay -> laptop ${LAPTOP_IP} (PUB :5601, SUB laptop:5602)  clouds=${RELAY_CLOUDS:-0} map=${RELAY_MAP:-0} ..."
 tmux kill-session -t dnav_zmq 2>/dev/null || true
 tmux new-session -d -s dnav_zmq "${NAV[*]} python3 ${HERE}/zmq_ros_bridge.py \
   --send '${SEND_TOPICS}' \
