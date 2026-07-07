@@ -84,6 +84,12 @@ class GlobalPlannerNode(Node):
         self.declare_parameter('stuck_penalty_amount', 2.0)     # penalty added per stuck event
         # T3 — re-anchor accumulated memory on a DLIO odom discontinuity.
         self.declare_parameter('odom_jump_threshold', 0.30)     # per-msg pose step = jump (m)
+        # 2.5D height-graded cost — real structure (tall) is lethal + inflated; a
+        # measured LOW return is soft cost, not a hard block (curbs / low clutter / noise).
+        self.declare_parameter('global_use_height_cost', True)
+        self.declare_parameter('global_foot_offset', 0.70)      # sensor(odom z) -> foot drop (m)
+        self.declare_parameter('global_low_height', 0.20)       # below this = soft, not lethal (m)
+        self.declare_parameter('global_low_cost', 0.45)         # soft cost applied to low returns
 
         self._max_range = float(self.get_parameter('max_range').value)
         self._goal_reached_radius = float(self.get_parameter('goal_reached_radius').value)
@@ -105,6 +111,10 @@ class GlobalPlannerNode(Node):
             max_half_width=float(self.get_parameter('global_max_half_width').value),
             penalty_decay=float(self.get_parameter('global_penalty_decay').value),
             penalty_max=float(self.get_parameter('global_penalty_max').value),
+            use_height_cost=bool(self.get_parameter('global_use_height_cost').value),
+            foot_offset=float(self.get_parameter('global_foot_offset').value),
+            low_height=float(self.get_parameter('global_low_height').value),
+            low_cost=float(self.get_parameter('global_low_cost').value),
         )
         self._planner = AStarPlanner(
             obstacle_threshold=0.5,
@@ -113,6 +123,7 @@ class GlobalPlannerNode(Node):
         )
 
         self._pose_xy: np.ndarray | None = None
+        self._pose_z: float | None = None        # for 2.5D height reference (foot)
         self._goal_xy: np.ndarray | None = None
         self._latest_obs: np.ndarray | None = None
         self._frame = 'odom'
@@ -173,6 +184,7 @@ class GlobalPlannerNode(Node):
                     f'[GLOBAL] odom jump {(dx * dx + dy * dy) ** 0.5:.2f} m — re-anchored global map',
                     throttle_duration_sec=1.0)
         self._pose_xy = xy
+        self._pose_z = float(msg.pose.pose.position.z)
 
     def _obs_cb(self, msg: PointCloud2):
         try:
@@ -181,7 +193,7 @@ class GlobalPlannerNode(Node):
             self.get_logger().warning(f'obstacle parse error: {exc}', throttle_duration_sec=5.0)
             return
         if len(pts) > 0:
-            self._latest_obs = pts[:, :2]
+            self._latest_obs = pts[:, :3]   # keep z for the 2.5D height layer
 
     def _goal_cb(self, msg: PoseStamped):
         self._goal_xy = np.array([msg.pose.position.x, msg.pose.position.y])
@@ -199,7 +211,7 @@ class GlobalPlannerNode(Node):
             d = np.hypot(obs[:, 0] - self._pose_xy[0], obs[:, 1] - self._pose_xy[1])
             obs = obs[d < self._max_range]
 
-        self._costmap.update(obs, self._pose_xy)
+        self._costmap.update(obs, self._pose_xy, self._pose_z)
 
         # T2: dead-end / stuck memory. Track progress toward the goal; if it stalls
         # for stuck_time_s, stamp a decaying penalty just ahead (toward the goal) so

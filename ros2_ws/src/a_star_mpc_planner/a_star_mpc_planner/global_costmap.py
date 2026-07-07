@@ -61,6 +61,10 @@ class GlobalCostmap:
         penalty_decay: float = 0.985,
         penalty_max: float = 4.0,
         penalty_cost_max: float = 0.60,
+        use_height_cost: bool = True,
+        foot_offset: float = 0.70,
+        low_height: float = 0.20,
+        low_cost: float = 0.45,
     ):
         self.reso = float(reso)
         self.half_width = float(half_width)
@@ -76,6 +80,14 @@ class GlobalCostmap:
         self.penalty_decay = float(np.clip(penalty_decay, 0.0, 1.0))
         self.penalty_max = float(penalty_max)
         self.penalty_cost_max = float(np.clip(penalty_cost_max, 0.0, 0.99))
+        # 2.5D height grading: an obstacle cell whose structure rises >= low_height
+        # above the robot's foot is a real wall/furniture -> lethal + inflated; a cell
+        # with only a low (measured) return is soft cost, not a hard block (curbs /
+        # low clutter / residual noise). foot_offset = sensor(odom z) -> foot drop.
+        self.use_height_cost = bool(use_height_cost)
+        self.foot_offset = float(foot_offset)
+        self.low_height = float(low_height)
+        self.low_cost = float(np.clip(low_cost, 0.0, 0.99))
 
         self.cells = int(round(2.0 * self.half_width / self.reso))
 
@@ -89,6 +101,7 @@ class GlobalCostmap:
         self._occ: np.ndarray | None = None      # confidence counts
         self._free: np.ndarray | None = None     # breadcrumb traversable
         self._penalty: np.ndarray | None = None  # dead-end / stuck soft cost
+        self._height: np.ndarray | None = None   # per-cell max structure height (m)
 
         # AStarPlanner-compatible read interface
         self.gmap: np.ndarray | None = None
@@ -107,6 +120,7 @@ class GlobalCostmap:
         self._occ = np.zeros((self.cells, self.cells), dtype=np.float32)
         self._free = np.zeros((self.cells, self.cells), dtype=bool)
         self._penalty = np.zeros((self.cells, self.cells), dtype=np.float32)
+        self._height = np.zeros((self.cells, self.cells), dtype=np.float32)
         self.gmap = np.zeros((self.cells, self.cells), dtype=np.float32)
         self._origin_set = True
 
@@ -138,6 +152,7 @@ class GlobalCostmap:
         self._occ = self._place(self._occ, new_cells, off_x, off_y, 0.0)
         self._free = self._place(self._free, new_cells, off_x, off_y, False)
         self._penalty = self._place(self._penalty, new_cells, off_x, off_y, 0.0)
+        self._height = self._place(self._height, new_cells, off_x, off_y, 0.0)
         self.gmap = np.zeros((new_cells, new_cells), dtype=np.float32)
         self.minx, self.miny, self.cells = new_minx, new_miny, new_cells
 
@@ -149,7 +164,8 @@ class GlobalCostmap:
             return
         stack = [np.asarray(robot_xy, dtype=float).reshape(1, 2)]
         if pts_xy is not None and len(pts_xy) > 0:
-            stack.append(np.asarray(pts_xy, dtype=float).reshape(-1, 2)[:, :2])
+            # points may be (N,2) or (N,3) — take xy only.
+            stack.append(np.atleast_2d(np.asarray(pts_xy, dtype=float))[:, :2])
         allp = np.vstack(stack)
         lo = allp.min(axis=0)
         hi = allp.max(axis=0)
@@ -204,8 +220,12 @@ class GlobalCostmap:
     # Accumulation
     # ------------------------------------------------------------------
 
-    def update(self, obstacle_points_world, robot_xy) -> None:
-        """Fold one frame of obstacles + the robot footprint into the map."""
+    def update(self, obstacle_points_world, robot_xy, robot_z=None) -> None:
+        """Fold one frame of obstacles + the robot footprint into the map.
+
+        obstacle_points_world may be (N,2) or (N,3); with (N,3) + robot_z the 2.5D
+        height layer accumulates the structure height above the robot's foot.
+        """
         if not self._origin_set:
             self.set_origin(robot_xy)
         # T1: grow/roll so the robot and this frame's obstacles fit before we write.
@@ -221,18 +241,23 @@ class GlobalCostmap:
         # ── Breadcrumb free-space under/around the robot ──
         self._stamp_disk(self._free_set, robot_xy, self.free_radius)
 
-        # ── Obstacle hits ──
+        # ── Obstacle hits (+ 2.5D height) ──
         if obstacle_points_world is not None and len(obstacle_points_world) > 0:
             pts = np.asarray(obstacle_points_world, dtype=float)
             ix = ((pts[:, 0] - self.minx) / self.reso).astype(np.intp)
             iy = ((pts[:, 1] - self.miny) / self.reso).astype(np.intp)
             inb = (ix >= 0) & (ix < self.cells) & (iy >= 0) & (iy < self.cells)
-            ix, iy = ix[inb], iy[inb]
-            if len(ix) > 0:
+            ixb, iyb = ix[inb], iy[inb]
+            if len(ixb) > 0:
                 # +1 per observed cell this frame (dedupe so one frame = one hit).
                 hit = np.zeros((self.cells, self.cells), dtype=np.float32)
-                hit[ix, iy] = 1.0
+                hit[ixb, iyb] = 1.0
                 self._occ = np.minimum(self._occ + hit, self.hit_cap)
+                # 2.5D: accumulate the max structure height (m above foot) per cell.
+                if self.use_height_cost and robot_z is not None and pts.shape[1] >= 3:
+                    foot_z = float(robot_z) - self.foot_offset
+                    h = (pts[inb, 2] - foot_z).astype(np.float32)
+                    np.maximum.at(self._height, (ixb, iyb), h)
 
     def _free_set(self, ix, iy) -> None:
         self._free[ix, iy] = True
@@ -275,14 +300,27 @@ class GlobalCostmap:
         occupied = (self._occ >= self.hit_threshold) & (~self._free)
         gmap = np.zeros((self.cells, self.cells), dtype=np.float32)
         if occupied.any():
-            min_d = distance_transform_edt(~occupied) * self.reso
-            lethal = min_d <= self.robot_radius
-            gmap[lethal] = 1.0
-            if self.inflation_radius > self.robot_radius:
-                band = (~lethal) & (min_d <= self.inflation_radius)
-                decay_len = max((self.inflation_radius - self.robot_radius) / 3.0, 1e-3)
-                gmap[band] = (self.soft_cost_max *
-                              np.exp(-(min_d[band] - self.robot_radius) / decay_len)).astype(np.float32)
+            if self.use_height_cost:
+                # 2.5D grade: a cell with a MEASURED low return (0 < h < low_height) is
+                # soft cost, not a hard block. Tall structures OR occupied cells with no
+                # measured height (h≈0, ambiguous) stay lethal — the safe default.
+                low_only = occupied & (self._height > 1e-3) & (self._height < self.low_height)
+                lethal_src = occupied & (~low_only)
+            else:
+                low_only = np.zeros_like(occupied)
+                lethal_src = occupied
+            if lethal_src.any():
+                min_d = distance_transform_edt(~lethal_src) * self.reso
+                lethal = min_d <= self.robot_radius
+                gmap[lethal] = 1.0
+                if self.inflation_radius > self.robot_radius:
+                    band = (~lethal) & (min_d <= self.inflation_radius)
+                    decay_len = max((self.inflation_radius - self.robot_radius) / 3.0, 1e-3)
+                    gmap[band] = (self.soft_cost_max *
+                                  np.exp(-(min_d[band] - self.robot_radius) / decay_len)).astype(np.float32)
+            # Low returns: soft cost only (no inflation) — discouraged, not blocked.
+            if low_only.any():
+                gmap[low_only] = np.maximum(gmap[low_only], np.float32(self.low_cost))
             # Breadcrumb-free cells are always traversable in the global layer.
             gmap[self._free] = 0.0
         # T2: dead-end/stuck penalty raises cost everywhere (soft, never lethal),
@@ -306,6 +344,10 @@ class GlobalCostmap:
         if not self._origin_set:
             return None
         occupied = (self._occ >= self.hit_threshold) & (~self._free)
+        if self.use_height_cost:
+            # Only CONFIRMED STRUCTURE (tall / unknown height) is fed to local fusion;
+            # ambiguous low returns are left to the live local costmap.
+            occupied &= ~((self._height > 1e-3) & (self._height < self.low_height))
         idx = np.argwhere(occupied)
         if idx.size == 0:
             return None
