@@ -383,8 +383,19 @@ void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published
   p.pose.orientation.y = this->state.q.y();
   p.pose.orientation.z = this->state.q.z();
 
-  this->path_ros.poses.push_back(p);
-  this->path_pub->publish(this->path_ros);
+  {
+    // Bound the trajectory and serialize access: an unbounded path grows until
+    // fastcdr can't serialize it (NotEnoughMemory -> SIGABRT), and concurrent
+    // detached publish threads must not modify path_ros while one is serializing.
+    std::lock_guard<std::mutex> path_lock(this->path_mutex);
+    this->path_ros.poses.push_back(p);
+    if (this->path_ros.poses.size() > kMaxPathPoses) {
+      this->path_ros.poses.erase(
+        this->path_ros.poses.begin(),
+        this->path_ros.poses.end() - kMaxPathPoses);
+    }
+    this->path_pub->publish(this->path_ros);
+  }
 
   // transform: odom to baselink
   geometry_msgs::msg::TransformStamped transformStamped;

@@ -131,6 +131,11 @@ private:
   geometry_msgs::msg::PoseStamped pose_ros;
   nav_msgs::msg::Path path_ros;
   geometry_msgs::msg::PoseArray kf_pose_ros;
+  // publishToROS() runs in a DETACHED per-scan thread, so several can touch path_ros
+  // at once. Guard append+trim+publish so the vector is never modified mid-serialize
+  // (that race + the unbounded growth threw fastcdr NotEnoughMemory -> SIGABRT).
+  std::mutex path_mutex;
+  static constexpr size_t kMaxPathPoses = 2000;  // ~200 s @ 10 Hz; bounds the CDR size
 
   // Flags
   std::atomic<bool> dlio_initialized;
