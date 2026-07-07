@@ -43,10 +43,17 @@ python3 -c "import casadi, zmq, scipy" 2>/dev/null || {
   echo "!! casadi/zmq/scipy missing — not the baked dnav-laptop:humble image?"
   echo "   rebuild: docker build -t dnav-laptop:humble - < Dockerfile.dnav"; }
 
-# Build a_star_mpc_planner once (idempotent; install/ persists on the host via the mount).
-if [ ! -f install/a_star_mpc_planner/share/a_star_mpc_planner/package.xml ]; then
-  echo ">> building a_star_mpc_planner (one-time) ..."
-  colcon build --packages-select a_star_mpc_planner --symlink-install
+# Build the planner (+ agentic_nav) when SOURCE is newer than the install — not a
+# one-shot gate. A stale "build once" install silently runs old code after every
+# source edit (this bit us: the global-memory + height-cost planner never ran).
+# --symlink-install so pure-Python edits are picked up without a rebuild afterward.
+BUILD_PKGS="a_star_mpc_planner agentic_nav"
+_mark="install/a_star_mpc_planner/share/a_star_mpc_planner/package.xml"
+if [ ! -f "$_mark" ] || \
+   [ -n "$(find src/a_star_mpc_planner src/agentic_nav -name '*.py' -newer "$_mark" 2>/dev/null | head -1)" ] || \
+   [ "${REBUILD:-0}" = "1" ]; then
+  echo ">> building ${BUILD_PKGS} (source changed or REBUILD=1) ..."
+  colcon build --packages-select ${BUILD_PKGS} --symlink-install
 fi
 
 # Hand off to autonomy.sh: JETSON_IP is in the env, which puts it in OFF-BOARD mode
