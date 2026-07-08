@@ -82,15 +82,20 @@ def segment_ground(xyz: np.ndarray, g_hat, robot_z: float,
     Returns:
         ``obstacle_xyz`` (M, 3), or ``(obstacle_xyz, info)`` if ``return_info``.
     """
-    xyz = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
+    # float32 throughout: heights/cells span metres at ~1e-5 m resolution, well
+    # inside float32 precision, and it halves the memory bandwidth of the
+    # dominant per-point passes (h = xyz@up, gather, mask) vs float64. Under
+    # numpy 2.x NEP-50 the python scalars below (foot, ground_band) don't upcast
+    # float32 arrays, so the whole pipeline stays float32.
+    xyz = np.asarray(xyz, dtype=np.float32).reshape(-1, 3)
     n_pts = xyz.shape[0]
     foot = float(robot_z) - params.leg_offset
 
     # "up" = -gravity, normalised. Heights are measured along it, so the filter
     # is correct even if odom gravity isn't exactly +Z.
-    up = -np.asarray(g_hat, dtype=np.float64).reshape(3)
+    up = -np.asarray(g_hat, dtype=np.float32).reshape(3)
     up_norm = np.linalg.norm(up)
-    up = up / up_norm if up_norm > 1e-9 else np.array([0.0, 0.0, 1.0])
+    up = up / up_norm if up_norm > 1e-9 else np.array([0.0, 0.0, 1.0], dtype=np.float32)
 
     def _info(status, ground_cells, n_cells):
         # candidate_cells / seed_cells kept for the node heartbeat's field names.
@@ -121,10 +126,14 @@ def segment_ground(xyz: np.ndarray, g_hat, robot_z: float,
     H = int(iy.max()) + 1
 
     # Per-cell minimum height + point count.
-    cell_min = np.full((W, H), np.inf, dtype=np.float64)
+    # Count via np.bincount on the flattened cell id: ~8x faster than the
+    # unbuffered np.add.at scatter (0.73 -> 0.09 ms at ~56k points), exact.
+    # (The min still needs a scatter — np.minimum.at — as a sort-based reduceat
+    # was measured slower here: argsort alone costs more than the scatter.)
+    cell_min = np.full((W, H), np.inf, dtype=np.float32)
     np.minimum.at(cell_min, (ix, iy), h)
-    cell_cnt = np.zeros((W, H), dtype=np.int64)
-    np.add.at(cell_cnt, (ix, iy), 1)
+    flat = ix.astype(np.int64) * H + iy
+    cell_cnt = np.bincount(flat, minlength=W * H).reshape(W, H)
     # A lone low point must not define ground: ignore under-populated cells.
     cell_min[cell_cnt < params.min_pts] = np.inf
 
@@ -135,7 +144,7 @@ def segment_ground(xyz: np.ndarray, g_hat, robot_z: float,
         for dj in (-1, 0, 1):
             if di == 0 and dj == 0:
                 continue
-            shifted = np.full((W, H), np.inf, dtype=np.float64)
+            shifted = np.full((W, H), np.inf, dtype=np.float32)
             di0, di1 = max(0, -di), W - max(0, di)     # destination row span
             si0, si1 = max(0, di), W - max(0, -di)      # source row span
             dj0, dj1 = max(0, -dj), H - max(0, dj)
