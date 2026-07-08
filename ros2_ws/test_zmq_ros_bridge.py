@@ -39,6 +39,11 @@ def test_unthrottled_drops_oldest_when_full():
     assert s.dropped == 1
 
 
+def test_topicsender_latched_flag_defaults_false_and_settable():
+    assert TopicSender(b"/tf", None, None, 5).latched is False
+    assert TopicSender(b"/tf_static", None, None, 5, latched=True).latched is True
+
+
 def test_get_returns_fifo_then_none_on_timeout():
     s = TopicSender(b"/a", None, min_interval=None, maxlen=5)
     s.offer("m1", 0.0)

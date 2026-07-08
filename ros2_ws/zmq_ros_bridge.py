@@ -100,10 +100,16 @@ class TopicSender:
     when full). get() runs on a dedicated sender thread which serializes + sends, so the
     expensive work is off the executor and parallel across topics."""
 
-    def __init__(self, topic_bytes, typ, min_interval, maxlen):
+    def __init__(self, topic_bytes, typ, min_interval, maxlen, latched=False):
         self.topic = topic_bytes
         self.typ = typ
         self.min_interval = min_interval
+        # latched (TRANSIENT_LOCAL, e.g. /tf_static): the ROS publisher sends it ONCE, but
+        # a ZMQ PUB does NOT replay to subscribers that connect later, so a laptop relay /
+        # RViz that joins after startup never gets it -> broken TF tree, no robot model, no
+        # lidar-frame clouds. The sender thread re-broadcasts the last latched message
+        # periodically so any late subscriber picks it up within RESEND_S.
+        self.latched = latched
         self.q = collections.deque(maxlen=max(1, maxlen))
         self._last = None      # monotonic time of last accepted offer (for throttle)
         self.dropped = 0       # dropped by queue-full (backpressure)
@@ -150,12 +156,13 @@ class ZmqRosBridge(Node):
             self.pub_sock.bind(args.pub_bind)
             for topic, typ_str, min_interval in parse_send_spec(args.send):
                 typ = load_type(typ_str)
-                sender = TopicSender(topic.encode(), typ, min_interval, maxlen=args.hwm)
+                latched = qos_for(topic).durability == DurabilityPolicy.TRANSIENT_LOCAL
+                sender = TopicSender(topic.encode(), typ, min_interval, maxlen=args.hwm, latched=latched)
                 self._senders[topic] = sender
                 self.create_subscription(
                     typ, topic, lambda msg, s=sender: self._on_ros(s, msg), qos_for(topic))
                 threading.Thread(target=self._send_loop, args=(sender,), daemon=True).start()
-                rate = f' @{1.0 / min_interval:.0f}Hz' if min_interval else ''
+                rate = f' @{1.0 / min_interval:.0f}Hz' if min_interval else (' (latched)' if latched else '')
                 self.get_logger().info(f'SEND {topic} ({typ.__name__}){rate} -> ZMQ {args.pub_bind}')
 
         # RECV: ZMQ SUB -> ROS publisher (deserialize on its own thread; already off-executor)
@@ -176,22 +183,39 @@ class ZmqRosBridge(Node):
         # Executor thread: stay cheap — just hand off the latest message.
         sender.offer(msg, time.monotonic())
 
+    _LATCH_RESEND_S = 2.0   # re-broadcast latched topics this often (for late subscribers)
+
+    def _emit(self, sender, data):
+        try:
+            with self._send_lock:                       # hold the lock only around send()
+                self.pub_sock.send_multipart([sender.topic, data], zmq.NOBLOCK)
+            sender.sent += 1
+        except zmq.Again:
+            sender.dropped += 1                          # drop under backpressure, don't block
+
     def _send_loop(self, sender):
+        last_latched = None                             # last serialized bytes of a latched topic
+        last_resend = 0.0
         while self._running and rclpy.ok():
             msg = sender.get(0.2)
             if msg is None:
+                # Idle tick: re-broadcast the latched message so a subscriber that
+                # connected after the one-shot publish still receives it.
+                if sender.latched and last_latched is not None:
+                    now = time.monotonic()
+                    if now - last_resend >= self._LATCH_RESEND_S:
+                        self._emit(sender, last_latched)
+                        last_resend = now
                 continue
             try:
                 data = serialize_message(msg)          # expensive — OFF the executor thread
             except Exception as e:                      # noqa: BLE001
                 self.get_logger().warn(f'serialize {sender.topic}: {e}')
                 continue
-            try:
-                with self._send_lock:                   # hold the lock only around send()
-                    self.pub_sock.send_multipart([sender.topic, data], zmq.NOBLOCK)
-                sender.sent += 1
-            except zmq.Again:
-                sender.dropped += 1                     # drop under backpressure, don't block
+            self._emit(sender, data)
+            if sender.latched:
+                last_latched = data
+                last_resend = time.monotonic()
 
     def _zmq_recv_loop(self):
         poller = zmq.Poller()
