@@ -113,6 +113,26 @@ def main():
     assert gc8.gmap[ix, iy] >= 1.0, "no height data must fall back to lethal (safe)"
     print("2.5D fallback (no z) ......... OK  (lethal without height data)")
 
+    # ── static map: seed from an OccupancyGrid, permanent + no grow ──
+    gc9 = GlobalCostmap(reso=0.5, half_width=3.0, hit_threshold=2.0, use_height_cost=False)
+    W, H = 6, 4
+    data = [0] * (W * H)
+    for y in range(H):
+        data[y * W + 3] = 100                        # vertical wall at column x=3
+    gc9.load_static_map(data, W, H, reso=0.5, origin_x=-1.0, origin_y=-2.0, occupied_thresh=50)
+    assert gc9._static and gc9.ready, "static flag/ready not set"
+    assert gc9.cells == max(W, H), "static grid should be square(max(w,h))"
+    ix, iy = gc9.world_to_index(0.5, -1.5)            # the wall (x=3 -> -1+1.5=0.5)
+    assert gc9._static_occ[ix, iy], "static wall cell must be occupied"
+    ixf, iyf = gc9.world_to_index(-1.0, -2.0)         # corner col0 -> free
+    assert not gc9._static_occ[ixf, iyf], "free cell must be free"
+    gc9.build()
+    assert gc9.gmap[ix, iy] >= 1.0, "static wall must be lethal in the cost grid"
+    c0 = gc9.cells
+    gc9.update(None, [50.0, 50.0])                    # robot far -> static must NOT grow
+    assert gc9.cells == c0, "static map must not grow/roll"
+    print("static-map seed+plan ......... OK  (%dx%d wall lethal, no grow)" % (W, H))
+
     print("\nALL GLOBAL COSTMAP TESTS PASSED")
 
 

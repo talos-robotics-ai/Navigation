@@ -21,13 +21,18 @@
     goal_y: 0.0
     goal_z: 0.0
 
-    # ─── Generic 2D OccupancyGrid fusion ────────────────────────────
-    # Backend-agnostic static-map layer (e.g. a Nav2 map server). Off by default.
-    enable_slam_map: false
-    slam_map_topic: /map
-    slam_map_occupied_threshold: 50
-    slam_map_unknown_is_obstacle: false
-    slam_map_max_age_sec: 5.0
+
+    # ─── GLOBAL planner: route over a PRE-BUILT static map ───────────
+    # OFF by default — the online-built GlobalCostmap is the default and what you
+    # are using now. When true, the global planner routes over a pre-built
+    # OccupancyGrid in the MAP frame instead: needs a map server (static_map_topic)
+    # AND a map-frame localizer (nav2_amcl -> map_pose_topic + map->odom TF). Live
+    # obstacles are left to the local planner (not fused into the static grid).
+    # Bring-up: launch/static_map_localization.launch.py.
+    use_static_map: false
+    static_map_topic: /map
+    map_pose_topic: /amcl_pose
+    static_occupied_thresh: 50
 
     # ─── DLIO global 3D map fusion ──────────────────────────────────
     # OFF by default: g1_local_map already gives a dense, ground-removed,

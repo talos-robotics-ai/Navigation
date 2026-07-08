@@ -102,6 +102,8 @@ class GlobalCostmap:
         self._free: np.ndarray | None = None     # breadcrumb traversable
         self._penalty: np.ndarray | None = None  # dead-end / stuck soft cost
         self._height: np.ndarray | None = None   # per-cell max structure height (m)
+        self._static_occ: np.ndarray | None = None  # permanent obstacles from a static map
+        self._static = False                      # static-map mode: fixed grid, no grow/roll
 
         # AStarPlanner-compatible read interface
         self.gmap: np.ndarray | None = None
@@ -121,6 +123,7 @@ class GlobalCostmap:
         self._free = np.zeros((self.cells, self.cells), dtype=bool)
         self._penalty = np.zeros((self.cells, self.cells), dtype=np.float32)
         self._height = np.zeros((self.cells, self.cells), dtype=np.float32)
+        self._static_occ = np.zeros((self.cells, self.cells), dtype=bool)
         self.gmap = np.zeros((self.cells, self.cells), dtype=np.float32)
         self._origin_set = True
 
@@ -153,6 +156,7 @@ class GlobalCostmap:
         self._free = self._place(self._free, new_cells, off_x, off_y, False)
         self._penalty = self._place(self._penalty, new_cells, off_x, off_y, 0.0)
         self._height = self._place(self._height, new_cells, off_x, off_y, 0.0)
+        self._static_occ = self._place(self._static_occ, new_cells, off_x, off_y, False)
         self.gmap = np.zeros((new_cells, new_cells), dtype=np.float32)
         self.minx, self.miny, self.cells = new_minx, new_miny, new_cells
 
@@ -160,8 +164,8 @@ class GlobalCostmap:
         """Ensure the grid comfortably contains the robot + this frame's points.
         Grows on the existing lattice up to max_half_width, then rolls to
         re-centre on the robot once at the cap."""
-        if not self._origin_set:
-            return
+        if not self._origin_set or self._static:
+            return  # a static map is a fixed-size grid — never grow/roll it
         stack = [np.asarray(robot_xy, dtype=float).reshape(1, 2)]
         if pts_xy is not None and len(pts_xy) > 0:
             # points may be (N,2) or (N,3) — take xy only.
@@ -215,6 +219,38 @@ class GlobalCostmap:
             return
         self.minx += float(dx)
         self.miny += float(dy)
+
+    # ------------------------------------------------------------------
+    # Static map (optional; off by default — see use_static_map param)
+    # ------------------------------------------------------------------
+
+    def load_static_map(self, data, width, height, reso, origin_x, origin_y,
+                        occupied_thresh: int = 50) -> None:
+        """Seed the map from a pre-built static OccupancyGrid (nav2_map_server /map).
+
+        Occupied cells (value >= occupied_thresh on the 0-100 ROS scale) become
+        PERMANENT obstacles (`_static_occ`) so the planner routes over the whole
+        pre-built environment from the first cycle. Live obstacles still accumulate
+        on top for dynamic things; growth/roll is disabled (the map is fixed size).
+        Origin/resolution come from the map header — run the planner in the map frame.
+        """
+        w, h = int(width), int(height)
+        grid = np.asarray(data, dtype=np.int16).reshape(h, w)     # ROS row-major [y, x]
+        occ_xy = (grid.T >= int(occupied_thresh))                 # -> [x, y]
+        n = max(w, h)                                             # square grid holding the map
+        self.reso = float(reso)
+        self.minx = float(origin_x)
+        self.miny = float(origin_y)
+        self.cells = n
+        self._occ = np.zeros((n, n), dtype=np.float32)
+        self._free = np.zeros((n, n), dtype=bool)
+        self._penalty = np.zeros((n, n), dtype=np.float32)
+        self._height = np.zeros((n, n), dtype=np.float32)
+        self._static_occ = np.zeros((n, n), dtype=bool)
+        self.gmap = np.zeros((n, n), dtype=np.float32)
+        self._static_occ[:w, :h] = occ_xy
+        self._origin_set = True
+        self._static = True
 
     # ------------------------------------------------------------------
     # Accumulation
@@ -297,7 +333,11 @@ class GlobalCostmap:
         """Rebuild self.gmap from the accumulated layers."""
         if not self._origin_set:
             return
-        occupied = (self._occ >= self.hit_threshold) & (~self._free)
+        # Live hit-counted obstacles OR permanent static-map obstacles (if seeded).
+        occ_raw = (self._occ >= self.hit_threshold)
+        if self._static_occ is not None:
+            occ_raw = occ_raw | self._static_occ
+        occupied = occ_raw & (~self._free)
         gmap = np.zeros((self.cells, self.cells), dtype=np.float32)
         if occupied.any():
             if self.use_height_cost:
@@ -343,7 +383,10 @@ class GlobalCostmap:
         """
         if not self._origin_set:
             return None
-        occupied = (self._occ >= self.hit_threshold) & (~self._free)
+        occ_raw = (self._occ >= self.hit_threshold)
+        if self._static_occ is not None:
+            occ_raw = occ_raw | self._static_occ
+        occupied = occ_raw & (~self._free)
         if self.use_height_cost:
             # Only CONFIRMED STRUCTURE (tall / unknown height) is fed to local fusion;
             # ambiguous low returns are left to the live local costmap.

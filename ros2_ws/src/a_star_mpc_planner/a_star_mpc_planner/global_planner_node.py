@@ -31,7 +31,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -90,6 +90,15 @@ class GlobalPlannerNode(Node):
         self.declare_parameter('global_foot_offset', 0.70)      # sensor(odom z) -> foot drop (m)
         self.declare_parameter('global_low_height', 0.20)       # below this = soft, not lethal (m)
         self.declare_parameter('global_low_cost', 0.45)         # soft cost applied to low returns
+        # ── STATIC-MAP mode (OFF by default; online map is the default) ──
+        # When true, route over a pre-built OccupancyGrid (nav2_map_server /map) in the
+        # MAP frame, with the robot pose from a map-frame localizer (nav2_amcl /amcl_pose).
+        # Live odom-frame obstacles are NOT fused here (the local planner handles dynamics);
+        # requires a map->odom localization (AMCL) to be running. See planner_params yaml.
+        self.declare_parameter('use_static_map', False)
+        self.declare_parameter('static_map_topic', '/map')
+        self.declare_parameter('map_pose_topic', '/amcl_pose')
+        self.declare_parameter('static_occupied_thresh', 50)    # 0-100; >= is an obstacle
 
         self._max_range = float(self.get_parameter('max_range').value)
         self._goal_reached_radius = float(self.get_parameter('goal_reached_radius').value)
@@ -151,6 +160,20 @@ class GlobalPlannerNode(Node):
             PoseStamped, str(self.get_parameter('global_goal_topic').value),
             self._goal_cb, 10)
 
+        # Static-map mode (default OFF): route over a pre-built /map in the map frame,
+        # pose from a map-frame localizer. Only wired when the flag is set.
+        self._use_static = bool(self.get_parameter('use_static_map').value)
+        self._static_thresh = int(self.get_parameter('static_occupied_thresh').value)
+        if self._use_static:
+            self.create_subscription(
+                OccupancyGrid, str(self.get_parameter('static_map_topic').value),
+                self._on_static_map, latched_qos)
+            self.create_subscription(
+                PoseWithCovarianceStamped, str(self.get_parameter('map_pose_topic').value),
+                self._on_map_pose, 10)
+            self.get_logger().warning(
+                'STATIC-MAP mode ON: routing over a pre-built map — needs map_server + AMCL.')
+
         self._path_pub = self.create_publisher(
             Path, str(self.get_parameter('global_path_topic').value), 10)
         self._costmap_pub = self.create_publisher(
@@ -170,6 +193,8 @@ class GlobalPlannerNode(Node):
     # ── Callbacks ──────────────────────────────────────────────────────
 
     def _odom_cb(self, msg: Odometry):
+        if self._use_static:
+            return  # static mode: pose + frame come from /amcl_pose + /map instead
         self._frame = msg.header.frame_id or 'odom'
         xy = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y])
         # T3: a per-message pose step larger than a walking robot can make is a DLIO
@@ -199,17 +224,38 @@ class GlobalPlannerNode(Node):
         self._goal_xy = np.array([msg.pose.position.x, msg.pose.position.y])
         self._goal_best_d = None   # new goal → reset stuck tracking
 
+    # ── Static-map mode callbacks (only active when use_static_map) ─────
+    def _on_static_map(self, msg: OccupancyGrid):
+        self._frame = msg.header.frame_id or 'map'
+        self._costmap.load_static_map(
+            msg.data, msg.info.width, msg.info.height, msg.info.resolution,
+            msg.info.origin.position.x, msg.info.origin.position.y,
+            occupied_thresh=self._static_thresh)
+        self.get_logger().info(
+            f'[GLOBAL] static map loaded: {msg.info.width}x{msg.info.height} '
+            f'@ {msg.info.resolution:.2f} m/cell, frame={self._frame}')
+
+    def _on_map_pose(self, msg: PoseWithCovarianceStamped):
+        self._pose_xy = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y])
+        self._pose_z = float(msg.pose.pose.position.z)
+
     # ── Global replanning ──────────────────────────────────────────────
 
     def _replan_cb(self):
         if self._pose_xy is None or self._goal_xy is None:
             return
+        if self._use_static and not self._costmap.ready:
+            return  # waiting for the static map to load
 
-        # Range-limit obstacles to the global window around the robot.
-        obs = self._latest_obs
-        if obs is not None and len(obs) > 0:
-            d = np.hypot(obs[:, 0] - self._pose_xy[0], obs[:, 1] - self._pose_xy[1])
-            obs = obs[d < self._max_range]
+        # Range-limit obstacles to the window. In STATIC mode we do NOT fuse the live
+        # odom-frame cloud into the map-frame static grid — the local planner handles
+        # dynamics; the global map is the pre-built structure.
+        obs = None
+        if not self._use_static:
+            obs = self._latest_obs
+            if obs is not None and len(obs) > 0:
+                d = np.hypot(obs[:, 0] - self._pose_xy[0], obs[:, 1] - self._pose_xy[1])
+                obs = obs[d < self._max_range]
 
         self._costmap.update(obs, self._pose_xy, self._pose_z)
 
