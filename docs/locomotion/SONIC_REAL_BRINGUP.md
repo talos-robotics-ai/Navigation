@@ -159,6 +159,58 @@ bridge converts it to world-frame `movement`/`facing` and the robot walks the pa
 
 ---
 
+## 3d. Distributed variant — A*/MPC off-board on the laptop
+
+Same SONIC gait, but the **A\*/MPC planner runs on a laptop** instead of the Orin
+(docs/planning/DISTRIBUTED_NAV_PLAN.md, Variant A). Use it to keep the Orin light, to
+iterate on the planner without a robot rebuild, or when on-board planning risks OOM.
+Nothing changes for SONIC — Step A is identical. The split is:
+
+```
+ JETSON  perception (DLIO + local_voxel_map) + SONIC gait bridge + ZMQ relay   [cores 0,1,2]
+         SONIC controller                                                       [cores 3,4,5]
+   │  ZMQ over WiFi  (NO DDS crosses the network — CDR bytes over one TCP socket)
+   │   down :5601  odom@20 + /tf + /local_voxel_map/{obstacles,costmap}   (+ clouds if RELAY_CLOUDS=1)
+   │   up   :5602  /mpc/cmd_vel
+ LAPTOP  A*/MPC planner + ZMQ relay + RViz/Foxglove   (Humble container, matches the Jetson CDR)
+```
+
+**Order:** Step A (SONIC controller, pinned 3–5) → the Jetson side → the laptop side →
+set a goal on the laptop.
+
+```bash
+# terminal 1 (Jetson) — SONIC controller first, exactly as Step A
+~/Navigation/ros2_ws/scripts/start_sonic_pinned.sh          # wait "Init Done"
+
+# terminal 2 (Jetson) — perception + gait bridge + relay (NO A*/MPC here). Pins to 0,1,2;
+# the FOREGROUND e-stop stays HERE (s=stop g=go q=quit) — the real stop is on the robot.
+LAPTOP_IP=<laptop wifi ip> ~/Navigation/ros2_ws/run_distributed_nav_jetson.sh
+
+# terminal 3 (laptop) — A*/MPC + relay + viz (auto-launches the Humble container)
+JETSON_IP=10.251.101.176 ./run_distributed_nav_laptop.sh     # add FOXGLOVE=1 for Foxglove
+```
+
+Then set a goal on the **laptop** (RViz 2D Goal Pose, or a Pose on `/global_goal` in
+Foxglove). `/mpc/cmd_vel` is relayed back to the Jetson bridge → SONIC.
+
+**Seeing the voxel map / obstacles on the laptop.** The Jetson relays
+`/local_voxel_map/obstacles` (+ `/costmap`) **by default** — that is the obstacle
+data the off-board A\*/MPC consume, and what shows in RViz/Foxglove. The heavier 3D
+clouds (DLIO deskewed scan + `local_voxel_map/voxel_grid`) are **OFF by default** to
+keep WiFi clear; ship them for a look with:
+```bash
+RELAY_CLOUDS=1 LAPTOP_IP=<laptop ip> ~/Navigation/ros2_ws/run_distributed_nav_jetson.sh
+```
+If obstacles/voxels stay **empty** on the laptop, it is almost always upstream on the
+Jetson (`local_voxel_map` producing nothing — usually a stalled MID-360), not a
+transport problem — see [§7 Troubleshooting](#7-troubleshooting).
+
+> **Safety in the split:** the e-stop is on the **Jetson** terminal (term 2). A laptop
+> Ctrl-C only stops the planner → `/mpc/cmd_vel` stops → the bridge's 0.5 s watchdog
+> zeros the gait. Never rely on the laptop as the only stop.
+
+---
+
 ## 4. What actually "starts" the walking
 
 The SONIC policy *process* is already running after Step A. The **gait starts** the
@@ -329,6 +381,7 @@ ps -L -o tid,psr,comm -p "$(pgrep -f '[g]1_deploy_onnx_ref')"
 | robot **slower** than commanded | expected ~0.85×; `speed_gain` (default 1.18) compensates, and the MPC closes the speed loop from odom. |
 | robot **won't turn** | `facing_lookahead_sec` must be > 0 (default 0.4). It's the whole turning mechanism in the closed-loop bridge. |
 | DLIO pose drifts / diverges at start | robot moved during the ~3 s IMU/gravity init — restart localization with the robot held still. |
+| **no voxel map / obstacles on the laptop** (distributed) | Debug upstream→downstream, NOT the WiFi. 1) Is `local_voxel_map` producing? Grep its log for the `in=… obstacles=…` heartbeat; `in=0` (or no line) = it's getting no deskewed cloud. 2) Is the MID-360 alive? DLIO log `Sensor Rates: Livox @ ~10 Hz`; if it dropped, the lidar stalled — restart the driver (`pkill -f livox_ros_driver2_node`; it now `respawn`s, or run `scripts/livox_watchdog.sh`). 3) `local_voxel_map` only emits obstacles for **non-ground** points in ±8 m; a bare hoist area near the floor can legitimately yield few. Move something into view. 4) Only then suspect transport: `ros2 topic hz /local_voxel_map/obstacles` **on the Jetson** (may read empty even when live — large-cloud CLI/QoS quirk; trust the relay + laptop RViz). The 3D `voxel_grid` needs `RELAY_CLOUDS=1`. |
 | `soft-holding` / `MotorCommand stale` at startup | benign: the controller soft-holds until the gait bridge sends the planner handshake — start `autonomy.sh` promptly after `Init Done`. If it recurs *mid-run*: SONIC state logging left on (keep OFF on hardware) or memory pressure. |
 | `[RT]` lines missing | launched from a stale shell — `ulimit -r` must be 99; re-login/fresh tmux after `setup_rt_limits.sh`. |
 
