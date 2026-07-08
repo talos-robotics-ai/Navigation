@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>agentic_nav</name>
+  <version>0.1.0</version>
+  <description>
+    Agentic navigation layer for the G1: a robot-agnostic skill/interface stack
+    on top of the existing geometric A*+MPC planner. Phase 1 exposes the
+    low-level navigation through a clean NavigationInterface + skills so it can be
+    driven and TESTED end-to-end before any VLM/agent is added. The spatial
+    memory and language/VLM skills are scaffolded but deferred.
+  </description>
+  <maintainer email="dev@talos-robotics.ai">TalOS Robotics</maintainer>
+  <license>Proprietary</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

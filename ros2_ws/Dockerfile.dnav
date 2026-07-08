@@ -14,7 +14,7 @@ FROM osrf/ros:humble-desktop
 # joint-state-publisher: neutral joint angles for the off-board G1 mesh (robot_model.launch.py)
 # — not in ros-humble-desktop. Renders the robot at the relayed odom pose, zero Jetson cost.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3-pip ros-humble-joint-state-publisher \
+      python3-pip ros-humble-joint-state-publisher ros-humble-foxglove-bridge \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m pip install --no-cache-dir "numpy<2" scipy pyzmq casadi
 

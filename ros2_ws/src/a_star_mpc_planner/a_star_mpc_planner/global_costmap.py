@@ -8,7 +8,7 @@ stay efficient. Long-horizon "plan the safe way home" memory therefore lives
 here, in a coarse, world-fixed grid that is consumed ONLY by the global planner
 to produce a route — never fused into the local costmap.
 
-Two layers, both world-fixed in the odom frame:
+Layers, all world-fixed in the odom frame:
   occupancy  — a hit-counted confidence per cell. A cell needs ``hit_threshold``
                separate observations before it counts as an obstacle, so a
                single-frame ghost (the failure mode that broke the naive DLIO
@@ -17,14 +17,29 @@ Two layers, both world-fixed in the odom frame:
   free        — a "breadcrumb" of where the robot has actually driven (within
                ``free_radius``). The corridor the robot came through is known
                traversable, so the global planner can always find the safe way
-               back along it. Free overrides occupancy in the global layer; the
-               LIVE local costmap is the safety net for anything dynamic that
-               later appears on that corridor.
+               back along it.
+  penalty     — (T2) a decaying soft-cost layer of "explored but this way did
+               NOT make progress" regions, stamped by the global planner when it
+               detects the robot is stuck/oscillating. Raises route cost (never
+               lethal) so A* prefers a fresh detour but can still traverse if
+               there is no alternative. Decays so a temporary blockage is retried.
+
+Memory model (the three upgrades)
+---------------------------------
+* T1 — the grid GROWS to contain the whole traversed scene instead of a fixed
+  box pinned at the start pose (``_reframe`` reallocates + copies, cheap at the
+  coarse 0.20 m resolution). It is capped at ``max_half_width``; once at the cap
+  it ROLLS to re-centre on the robot (bounded-memory fallback, drops the far edge).
+* T2 — the ``penalty`` layer + ``stamp_penalty`` give dead-end / stuck memory.
+* T3 — ``shift`` re-anchors the accumulated layers after a DLIO odom
+  discontinuity (loop closure) so a jump doesn't smear memory into ghost walls.
 
 The class deliberately mirrors the read interface of FixedGaussianGridMap
-(``gmap``/``hmap``/``cells``/``reso``/``minx``/``miny``/``world_to_index``/
+(``gmap``/``cells``/``reso``/``minx``/``miny``/``world_to_index``/
 ``index_to_world``) so the existing AStarPlanner runs on it unchanged.
 """
+
+import math
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt
@@ -42,6 +57,14 @@ class GlobalCostmap:
         hit_cap: float = 6.0,
         decay: float = 0.997,
         free_radius: float = 0.35,
+        max_half_width: float = 80.0,
+        penalty_decay: float = 0.985,
+        penalty_max: float = 4.0,
+        penalty_cost_max: float = 0.60,
+        use_height_cost: bool = True,
+        foot_offset: float = 0.70,
+        low_height: float = 0.20,
+        low_cost: float = 0.45,
     ):
         self.reso = float(reso)
         self.half_width = float(half_width)
@@ -52,34 +75,55 @@ class GlobalCostmap:
         self.hit_cap = float(hit_cap)
         self.decay = float(decay)
         self.free_radius = float(free_radius)
+        # T1 growth cap; T2 penalty dynamics.
+        self.max_half_width = max(float(max_half_width), self.half_width)
+        self.penalty_decay = float(np.clip(penalty_decay, 0.0, 1.0))
+        self.penalty_max = float(penalty_max)
+        self.penalty_cost_max = float(np.clip(penalty_cost_max, 0.0, 0.99))
+        # 2.5D height grading: an obstacle cell whose structure rises >= low_height
+        # above the robot's foot is a real wall/furniture -> lethal + inflated; a cell
+        # with only a low (measured) return is soft cost, not a hard block (curbs /
+        # low clutter / residual noise). foot_offset = sensor(odom z) -> foot drop.
+        self.use_height_cost = bool(use_height_cost)
+        self.foot_offset = float(foot_offset)
+        self.low_height = float(low_height)
+        self.low_cost = float(np.clip(low_cost, 0.0, 0.99))
 
         self.cells = int(round(2.0 * self.half_width / self.reso))
 
-        # World-frame origin (bottom-left). Fixed at the first set_origin() call.
+        # World-frame origin (bottom-left). Set at first set_origin(); afterwards
+        # it moves as the grid grows/rolls (T1) or is re-anchored (T3).
         self.minx = 0.0
         self.miny = 0.0
         self._origin_set = False
 
         # Layers (allocated on first set_origin)
-        self._occ: np.ndarray | None = None    # confidence counts
-        self._free: np.ndarray | None = None   # breadcrumb traversable
+        self._occ: np.ndarray | None = None      # confidence counts
+        self._free: np.ndarray | None = None     # breadcrumb traversable
+        self._penalty: np.ndarray | None = None  # dead-end / stuck soft cost
+        self._height: np.ndarray | None = None   # per-cell max structure height (m)
+        self._static_occ: np.ndarray | None = None  # permanent obstacles from a static map
+        self._static = False                      # static-map mode: fixed grid, no grow/roll
 
         # AStarPlanner-compatible read interface
         self.gmap: np.ndarray | None = None
-        self.hmap = None                       # no 2.5D layer on the global map
+        self.hmap = None                         # no 2.5D layer on the global map
 
     # ------------------------------------------------------------------
     # Origin / lifecycle
     # ------------------------------------------------------------------
 
     def set_origin(self, robot_xy) -> None:
-        """Fix the world origin so the grid is centred on the first robot pose."""
+        """Fix the world origin so the grid is initially centred on the robot."""
         if self._origin_set:
             return
         self.minx = float(robot_xy[0]) - self.half_width
         self.miny = float(robot_xy[1]) - self.half_width
         self._occ = np.zeros((self.cells, self.cells), dtype=np.float32)
         self._free = np.zeros((self.cells, self.cells), dtype=bool)
+        self._penalty = np.zeros((self.cells, self.cells), dtype=np.float32)
+        self._height = np.zeros((self.cells, self.cells), dtype=np.float32)
+        self._static_occ = np.zeros((self.cells, self.cells), dtype=bool)
         self.gmap = np.zeros((self.cells, self.cells), dtype=np.float32)
         self._origin_set = True
 
@@ -88,41 +132,183 @@ class GlobalCostmap:
         return self._origin_set
 
     # ------------------------------------------------------------------
+    # T1 — grow / re-centre so the grid contains the whole traversed scene
+    # ------------------------------------------------------------------
+
+    def _place(self, old, new_cells, off_x, off_y, fill):
+        """Copy `old` into a fresh (new_cells, new_cells) array at cell offset
+        (off_x, off_y). Handles negative offsets (rolling drops the far edge)."""
+        new = np.full((new_cells, new_cells), fill, dtype=old.dtype)
+        sx, sy = max(0, off_x), max(0, off_y)          # dest start
+        ox, oy = max(0, -off_x), max(0, -off_y)        # src start
+        cx = min(old.shape[0] - ox, new_cells - sx)
+        cy = min(old.shape[1] - oy, new_cells - sy)
+        if cx > 0 and cy > 0:
+            new[sx:sx + cx, sy:sy + cy] = old[ox:ox + cx, oy:oy + cy]
+        return new
+
+    def _regrid(self, new_minx, new_miny, new_cells) -> None:
+        """Reallocate every layer onto a new origin/size, preserving world data.
+        new_minx/new_miny MUST sit on the current cell lattice (integer offset)."""
+        off_x = int(round((self.minx - new_minx) / self.reso))
+        off_y = int(round((self.miny - new_miny) / self.reso))
+        self._occ = self._place(self._occ, new_cells, off_x, off_y, 0.0)
+        self._free = self._place(self._free, new_cells, off_x, off_y, False)
+        self._penalty = self._place(self._penalty, new_cells, off_x, off_y, 0.0)
+        self._height = self._place(self._height, new_cells, off_x, off_y, 0.0)
+        self._static_occ = self._place(self._static_occ, new_cells, off_x, off_y, False)
+        self.gmap = np.zeros((new_cells, new_cells), dtype=np.float32)
+        self.minx, self.miny, self.cells = new_minx, new_miny, new_cells
+
+    def _reframe(self, robot_xy, pts_xy) -> None:
+        """Ensure the grid comfortably contains the robot + this frame's points.
+        Grows on the existing lattice up to max_half_width, then rolls to
+        re-centre on the robot once at the cap."""
+        if not self._origin_set or self._static:
+            return  # a static map is a fixed-size grid — never grow/roll it
+        stack = [np.asarray(robot_xy, dtype=float).reshape(1, 2)]
+        if pts_xy is not None and len(pts_xy) > 0:
+            # points may be (N,2) or (N,3) — take xy only.
+            stack.append(np.atleast_2d(np.asarray(pts_xy, dtype=float))[:, :2])
+        allp = np.vstack(stack)
+        lo = allp.min(axis=0)
+        hi = allp.max(axis=0)
+        cur_maxx = self.minx + self.cells * self.reso
+        cur_maxy = self.miny + self.cells * self.reso
+        pad = self.reso * 6.0
+        if (lo[0] - pad >= self.minx and lo[1] - pad >= self.miny and
+                hi[0] + pad < cur_maxx and hi[1] + pad < cur_maxy):
+            return  # comfortably inside — nothing to do
+
+        max_cells = int(round(2.0 * self.max_half_width / self.reso))
+
+        # Extend the origin down (staying on the lattice) and size up to fit
+        # everything + pad. Decide GROW vs ROLL by the NEEDED size vs the cap.
+        new_minx, new_miny = self.minx, self.miny
+        if lo[0] - pad < self.minx:
+            new_minx = self.minx - math.ceil((self.minx - (lo[0] - pad)) / self.reso) * self.reso
+        if lo[1] - pad < self.miny:
+            new_miny = self.miny - math.ceil((self.miny - (lo[1] - pad)) / self.reso) * self.reso
+        need_maxx = max(cur_maxx, hi[0] + pad)
+        need_maxy = max(cur_maxy, hi[1] + pad)
+        span = max(need_maxx - new_minx, need_maxy - new_miny)
+        need_cells = int(math.ceil(span / self.reso))
+
+        if need_cells <= max_cells:
+            self._regrid(new_minx, new_miny, need_cells)   # GROW to fit
+            return
+
+        # Exceeds the cap → ROLL a max-size grid re-centred on the robot, dropping
+        # the far edge (bounded-memory fallback). Snap to the old lattice.
+        want_minx = float(robot_xy[0]) - self.max_half_width
+        want_miny = float(robot_xy[1]) - self.max_half_width
+        off_x = int(round((self.minx - want_minx) / self.reso))
+        off_y = int(round((self.miny - want_miny) / self.reso))
+        self._regrid(self.minx - off_x * self.reso, self.miny - off_y * self.reso, max_cells)
+
+    def shift(self, dx: float, dy: float) -> None:
+        """T3 — re-anchor after an odom discontinuity (loop closure).
+
+        A jump means the robot's reported position stepped by (dx, dy) without
+        real motion, so every accumulated cell's odom coordinate is now stale by
+        that amount. Moving the origin by the same delta re-labels the existing
+        data into the new odom frame in O(1), keeping memory aligned instead of
+        smearing it into ghost walls.
+        """
+        if not self._origin_set:
+            return
+        self.minx += float(dx)
+        self.miny += float(dy)
+
+    # ------------------------------------------------------------------
+    # Static map (optional; off by default — see use_static_map param)
+    # ------------------------------------------------------------------
+
+    def load_static_map(self, data, width, height, reso, origin_x, origin_y,
+                        occupied_thresh: int = 50) -> None:
+        """Seed the map from a pre-built static OccupancyGrid (nav2_map_server /map).
+
+        Occupied cells (value >= occupied_thresh on the 0-100 ROS scale) become
+        PERMANENT obstacles (`_static_occ`) so the planner routes over the whole
+        pre-built environment from the first cycle. Live obstacles still accumulate
+        on top for dynamic things; growth/roll is disabled (the map is fixed size).
+        Origin/resolution come from the map header — run the planner in the map frame.
+        """
+        w, h = int(width), int(height)
+        grid = np.asarray(data, dtype=np.int16).reshape(h, w)     # ROS row-major [y, x]
+        occ_xy = (grid.T >= int(occupied_thresh))                 # -> [x, y]
+        n = max(w, h)                                             # square grid holding the map
+        self.reso = float(reso)
+        self.minx = float(origin_x)
+        self.miny = float(origin_y)
+        self.cells = n
+        self._occ = np.zeros((n, n), dtype=np.float32)
+        self._free = np.zeros((n, n), dtype=bool)
+        self._penalty = np.zeros((n, n), dtype=np.float32)
+        self._height = np.zeros((n, n), dtype=np.float32)
+        self._static_occ = np.zeros((n, n), dtype=bool)
+        self.gmap = np.zeros((n, n), dtype=np.float32)
+        self._static_occ[:w, :h] = occ_xy
+        self._origin_set = True
+        self._static = True
+
+    # ------------------------------------------------------------------
     # Accumulation
     # ------------------------------------------------------------------
 
-    def update(self, obstacle_points_world, robot_xy) -> None:
+    def update(self, obstacle_points_world, robot_xy, robot_z=None) -> None:
         """Fold one frame of obstacles + the robot footprint into the map.
 
-        obstacle_points_world : (N, 2|3) world-frame obstacle points (the clean,
-                                already-ground-removed local cloud).
-        robot_xy              : current robot position (marks a free breadcrumb).
+        obstacle_points_world may be (N,2) or (N,3); with (N,3) + robot_z the 2.5D
+        height layer accumulates the structure height above the robot's foot.
         """
         if not self._origin_set:
             self.set_origin(robot_xy)
+        # T1: grow/roll so the robot and this frame's obstacles fit before we write.
+        self._reframe(robot_xy, obstacle_points_world)
 
         # Slow global decay so stale/removed obstacles fade over time.
         if self.decay < 1.0:
             self._occ *= self.decay
+        # T2: dead-end penalties fade so a temporary blockage is eventually retried.
+        if self.penalty_decay < 1.0:
+            self._penalty *= self.penalty_decay
 
         # ── Breadcrumb free-space under/around the robot ──
         self._stamp_disk(self._free_set, robot_xy, self.free_radius)
 
-        # ── Obstacle hits ──
+        # ── Obstacle hits (+ 2.5D height) ──
         if obstacle_points_world is not None and len(obstacle_points_world) > 0:
             pts = np.asarray(obstacle_points_world, dtype=float)
             ix = ((pts[:, 0] - self.minx) / self.reso).astype(np.intp)
             iy = ((pts[:, 1] - self.miny) / self.reso).astype(np.intp)
             inb = (ix >= 0) & (ix < self.cells) & (iy >= 0) & (iy < self.cells)
-            ix, iy = ix[inb], iy[inb]
-            if len(ix) > 0:
+            ixb, iyb = ix[inb], iy[inb]
+            if len(ixb) > 0:
                 # +1 per observed cell this frame (dedupe so one frame = one hit).
                 hit = np.zeros((self.cells, self.cells), dtype=np.float32)
-                hit[ix, iy] = 1.0
+                hit[ixb, iyb] = 1.0
                 self._occ = np.minimum(self._occ + hit, self.hit_cap)
+                # 2.5D: accumulate the max structure height (m above foot) per cell.
+                if self.use_height_cost and robot_z is not None and pts.shape[1] >= 3:
+                    foot_z = float(robot_z) - self.foot_offset
+                    h = (pts[inb, 2] - foot_z).astype(np.float32)
+                    np.maximum.at(self._height, (ixb, iyb), h)
 
     def _free_set(self, ix, iy) -> None:
         self._free[ix, iy] = True
+
+    def stamp_penalty(self, center_xy, radius: float, amount: float) -> None:
+        """T2 — mark a region as 'explored, did not make progress' (soft repulsion).
+        Called by the global planner on a stuck/oscillation event."""
+        if not self._origin_set:
+            return
+
+        def _add(ix, iy):
+            self._penalty[ix, iy] = np.minimum(
+                self._penalty[ix, iy] + float(amount), self.penalty_max)
+
+        self._stamp_disk(_add, center_xy, radius)
 
     def _stamp_disk(self, fn, center_xy, radius) -> None:
         """Apply fn(ix, iy) over the cells within `radius` of center_xy."""
@@ -147,21 +333,42 @@ class GlobalCostmap:
         """Rebuild self.gmap from the accumulated layers."""
         if not self._origin_set:
             return
-        occupied = (self._occ >= self.hit_threshold) & (~self._free)
+        # Live hit-counted obstacles OR permanent static-map obstacles (if seeded).
+        occ_raw = (self._occ >= self.hit_threshold)
+        if self._static_occ is not None:
+            occ_raw = occ_raw | self._static_occ
+        occupied = occ_raw & (~self._free)
         gmap = np.zeros((self.cells, self.cells), dtype=np.float32)
-        if not occupied.any():
-            self.gmap = gmap
-            return
-        min_d = distance_transform_edt(~occupied) * self.reso
-        lethal = min_d <= self.robot_radius
-        gmap[lethal] = 1.0
-        if self.inflation_radius > self.robot_radius:
-            band = (~lethal) & (min_d <= self.inflation_radius)
-            decay_len = max((self.inflation_radius - self.robot_radius) / 3.0, 1e-3)
-            gmap[band] = (self.soft_cost_max *
-                          np.exp(-(min_d[band] - self.robot_radius) / decay_len)).astype(np.float32)
-        # Breadcrumb-free cells are always traversable in the global layer.
-        gmap[self._free] = 0.0
+        if occupied.any():
+            if self.use_height_cost:
+                # 2.5D grade: a cell with a MEASURED low return (0 < h < low_height) is
+                # soft cost, not a hard block. Tall structures OR occupied cells with no
+                # measured height (h≈0, ambiguous) stay lethal — the safe default.
+                low_only = occupied & (self._height > 1e-3) & (self._height < self.low_height)
+                lethal_src = occupied & (~low_only)
+            else:
+                low_only = np.zeros_like(occupied)
+                lethal_src = occupied
+            if lethal_src.any():
+                min_d = distance_transform_edt(~lethal_src) * self.reso
+                lethal = min_d <= self.robot_radius
+                gmap[lethal] = 1.0
+                if self.inflation_radius > self.robot_radius:
+                    band = (~lethal) & (min_d <= self.inflation_radius)
+                    decay_len = max((self.inflation_radius - self.robot_radius) / 3.0, 1e-3)
+                    gmap[band] = (self.soft_cost_max *
+                                  np.exp(-(min_d[band] - self.robot_radius) / decay_len)).astype(np.float32)
+            # Low returns: soft cost only (no inflation) — discouraged, not blocked.
+            if low_only.any():
+                gmap[low_only] = np.maximum(gmap[low_only], np.float32(self.low_cost))
+            # Breadcrumb-free cells are always traversable in the global layer.
+            gmap[self._free] = 0.0
+        # T2: dead-end/stuck penalty raises cost everywhere (soft, never lethal),
+        # applied AFTER the breadcrumb override so a corridor the robot proved to
+        # be a dead-end stays costly even though it's on the breadcrumb.
+        if self._penalty is not None and self._penalty.max() > 0.0:
+            pen = np.clip(self._penalty, 0.0, self.penalty_cost_max)
+            gmap = np.maximum(gmap, pen)
         self.gmap = gmap
 
     def confirmed_hit_points(self) -> np.ndarray | None:
@@ -176,7 +383,14 @@ class GlobalCostmap:
         """
         if not self._origin_set:
             return None
-        occupied = (self._occ >= self.hit_threshold) & (~self._free)
+        occ_raw = (self._occ >= self.hit_threshold)
+        if self._static_occ is not None:
+            occ_raw = occ_raw | self._static_occ
+        occupied = occ_raw & (~self._free)
+        if self.use_height_cost:
+            # Only CONFIRMED STRUCTURE (tall / unknown height) is fed to local fusion;
+            # ambiguous low returns are left to the live local costmap.
+            occupied &= ~((self._height > 1e-3) & (self._height < self.low_height))
         idx = np.argwhere(occupied)
         if idx.size == 0:
             return None

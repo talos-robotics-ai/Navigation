@@ -1,0 +1,113 @@
+{
+  "configById": {
+    "3D!nav": {
+      "cameraState": {
+        "distance": 18,
+        "perspective": true,
+        "phi": 55,
+        "thetaOffset": 45,
+        "target": [0, 0, 0],
+        "targetOffset": [0, 0, 0],
+        "targetOrientation": [0, 0, 0, 1],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-position",
+      "followTf": "base_link",
+      "scene": { "transforms": { "axisScale": 0.6 } },
+      "transforms": {},
+      "topics": {
+        "/robot_description": { "visible": true },
+        "/dlio/odom_node/odom": { "visible": true },
+        "/local_voxel_map/obstacles": {
+          "visible": true, "colorField": "z", "colorMode": "colormap", "colorMap": "turbo", "pointSize": 3
+        },
+        "/global_planner/costmap": { "visible": true, "frameLocked": true },
+        "/local_voxel_map/costmap": { "visible": false },
+        "/global_planner/known_obstacles": {
+          "visible": true, "colorField": "x", "colorMode": "flat", "flatColor": "#ff3030ff", "pointSize": 5
+        },
+        "/dlio/odom_node/pointcloud/deskewed": {
+          "visible": false, "colorField": "z", "colorMode": "colormap", "colorMap": "turbo", "pointSize": 2
+        },
+        "/a_star/path": { "visible": true, "lineWidth": 0.05, "gradient": ["#00ff00ff", "#00ff00ff"] },
+        "/mpc/predicted_path": { "visible": true, "lineWidth": 0.05, "gradient": ["#00b3ffff", "#00b3ffff"] },
+        "/global_path": { "visible": true, "lineWidth": 0.08, "gradient": ["#ff00ffff", "#ff00ffff"] },
+        "/global_goal": { "visible": true }
+      },
+      "layers": {},
+      "publish": {
+        "type": "pose",
+        "poseTopic": "/global_goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26
+      }
+    },
+    "Plot!vel": {
+      "title": "MPC velocity command (/mpc/cmd_vel)",
+      "paths": [
+        { "value": "/mpc/cmd_vel.linear.x", "enabled": true, "timestampMethod": "receiveTime", "label": "vx [m/s]" },
+        { "value": "/mpc/cmd_vel.linear.y", "enabled": true, "timestampMethod": "receiveTime", "label": "vy [m/s]" },
+        { "value": "/mpc/cmd_vel.angular.z", "enabled": true, "timestampMethod": "receiveTime", "label": "wz [rad/s]" }
+      ],
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 30,
+      "sidebarDimension": 220
+    },
+    "Plot!diag": {
+      "title": "MPC solver (/mpc/diagnostics: solve ms, cost)",
+      "paths": [
+        { "value": "/mpc/diagnostics.data[0]", "enabled": true, "timestampMethod": "receiveTime", "label": "diag[0]" },
+        { "value": "/mpc/diagnostics.data[1]", "enabled": true, "timestampMethod": "receiveTime", "label": "diag[1]" }
+      ],
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 30,
+      "sidebarDimension": 220
+    },
+    "StateTransitions!state": {
+      "paths": [
+        { "value": "/navigation/state.data", "timestampMethod": "receiveTime", "label": "nav state" }
+      ],
+      "isSynced": true
+    },
+    "RawMessages!goal": {
+      "topicPath": "/global_goal.pose.position"
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1 },
+  "layout": {
+    "first": "3D!nav",
+    "second": {
+      "first": "Plot!vel",
+      "second": {
+        "first": "Plot!diag",
+        "second": {
+          "first": "StateTransitions!state",
+          "second": "RawMessages!goal",
+          "direction": "column",
+          "splitPercentage": 62
+        },
+        "direction": "column",
+        "splitPercentage": 45
+      },
+      "direction": "column",
+      "splitPercentage": 36
+    },
+    "direction": "row",
+    "splitPercentage": 64
+  }
+}

@@ -181,7 +181,7 @@ if $OFFBOARD; then
     # Subscribe to the full g1_dlio.rviz viz set; topics the Jetson doesn't send (e.g.
     # the heavy clouds unless RELAY_CLOUDS=1) just sit idle at zero cost. cmd_vel goes back.
     run_launch "${LOCALIZATION_LOG}" python3 "${WS}/zmq_ros_bridge.py" \
-        --recv "/dlio/odom_node/odom:nav_msgs/msg/Odometry,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2,/dlio/odom_node/path:nav_msgs/msg/Path,/local_voxel_map/costmap:nav_msgs/msg/OccupancyGrid,/dlio/odom_node/pointcloud/deskewed:sensor_msgs/msg/PointCloud2,/dlio/map_node/map:sensor_msgs/msg/PointCloud2,/local_voxel_map/voxel_grid:sensor_msgs/msg/PointCloud2" \
+        --recv "/dlio/odom_node/odom:nav_msgs/msg/Odometry,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2,/local_voxel_map/costmap:nav_msgs/msg/OccupancyGrid,/dlio/odom_node/pointcloud/deskewed:sensor_msgs/msg/PointCloud2,/dlio/map_node/map:sensor_msgs/msg/PointCloud2,/local_voxel_map/voxel_grid:sensor_msgs/msg/PointCloud2" \
         --sub-connect "tcp://${JETSON_IP}:5601" \
         --send "/mpc/cmd_vel:geometry_msgs/msg/Twist" \
         --pub-bind "tcp://*:5602"
@@ -215,11 +215,17 @@ echo ">> [2/2] A*+MPC planner (${planner_args[*]}) ..."
 echo ">>       logs -> ${PLANNER_LOG}"
 run_launch "${PLANNER_LOG}" ros2 launch a_star_mpc_planner planner.launch.py "${planner_args[@]}"
 
-# Off-board RViz: the SAME g1_dlio.rviz autonomy.sh uses on-board (SetGoal already bound
-# to /global_goal). Shows the relayed DLIO/costmap/obstacles + the local A*/MPC output.
-# The heavy CloudMap/CloudRegistered displays only fill in when the Jetson runs with
-# RELAY_CLOUDS=1; otherwise they sit empty (harmless). RVIZ_CONFIG overrides the file.
-if $OFFBOARD && { [[ -n "${DISPLAY:-}" ]] || [[ -S /tmp/.X11-unix/X0 ]]; }; then
+# Off-board visualization. FOXGLOVE=1 serves the WHOLE laptop graph (relayed
+# perception + local A*/MPC + goals) over ws://localhost:8765 — connect Foxglove Studio
+# there; publish a Pose on /global_goal to drive. No X display needed, no Jetson load.
+# Otherwise open RViz with the SAME g1_dlio.rviz (SetGoal already bound to /global_goal);
+# heavy CloudMap/CloudRegistered fill in only when the Jetson runs RELAY_CLOUDS=1.
+if $OFFBOARD && [[ "${FOXGLOVE:-0}" == "1" ]]; then
+    echo ">> Foxglove bridge -> ws://localhost:8765 (Foxglove Studio: Open connection -> that URL)"
+    echo ">>   publish a Pose on /global_goal to set a goal; everything (odom/obstacles/A*/MPC) is here"
+    run_launch "${LOG_DIR}/foxglove_${TS}.log" \
+        ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=8765
+elif $OFFBOARD && { [[ -n "${DISPLAY:-}" ]] || [[ -S /tmp/.X11-unix/X0 ]]; }; then
     RVIZ_CONFIG="${RVIZ_CONFIG:-${WS}/src/g1_bringup/rviz/g1_dlio.rviz}"
     echo ">> RViz (${RVIZ_CONFIG##*/}; 2D Goal Pose -> /global_goal) ..."
     run_launch "${LOG_DIR}/rviz_${TS}.log" rviz2 -d "${RVIZ_CONFIG}"

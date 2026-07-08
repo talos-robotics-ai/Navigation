@@ -20,18 +20,14 @@ deployment layer, whose perception front-end is DLIO + g1_local_map:
 
 Static map fusion
 -----------------
-The planner can still fuse a static global obstacle layer into its local grid:
-  - enable_slam_map:=true → a generic 2D OccupancyGrid (/map). Backend-agnostic
-    helper (e.g. a Nav2 map server); not auto-enabled, defaults off.
-  - enable_dlio_map:=true → DLIO's global 3D map (/dlio/map_node/map) fused as
-    static context. Defaults OFF (g1_local_map already gives a dense
-    ground-removed cloud); the fusion path strips the map's floor first, since
-    the DLIO global map is the raw accumulated cloud and still contains ground.
+The planner can optionally fuse DLIO's global 3D map (/dlio/map_node/map,
+enable_dlio_map:=true) as static context, floor-stripped; defaults OFF since
+g1_local_map already gives a dense ground-removed cloud. Static-map ROUTING is
+handled by the global planner (use_static_map), not fused here.
 
 Data flow:
   /local_voxel_map/obstacles ──┐
   persistent_map             ──┼──► FixedGaussianGridMap ──► A* ──► /a_star/path
-  (optional 2D /map cells)   ──┘
 
 Architecture
 ------------
@@ -40,8 +36,6 @@ Architecture
                                                   PoseStamped; frame `odom`)
     /local_voxel_map/obstacles PointCloud2       — ground-removed obstacle cloud
     /global_goal               PoseStamped       — runtime global goal override
-    /map                       OccupancyGrid     — generic 2D static map
-                                                  (only when enable_slam_map=true)
 
   Publishes:
     /a_star/path              nav_msgs/Path             — local A* path
@@ -72,7 +66,6 @@ from a_star_mpc_planner.a_star_planner import AStarPlanner
 from a_star_mpc_planner.external_grid_map import parse_costmap_raw
 from a_star_mpc_planner.gaussian_grid_map import FixedGaussianGridMap
 from a_star_mpc_planner.persistent_map import PersistentOccupancyMap
-from a_star_mpc_planner.slam_map_utils import extract_slam_obstacle_points
 
 
 def read_xyz(msg: PointCloud2) -> np.ndarray:
@@ -171,16 +164,6 @@ class AStarNode(Node):
         # 3D voxel grid Z extent
         self.declare_parameter('voxel_z_min',           0.4)
         self.declare_parameter('voxel_z_max',           2.5)
-        # ── Generic 2D OccupancyGrid fusion ───────────────────────────
-        # Set enable_slam_map:=true to fuse occupied cells from a 2D
-        # OccupancyGrid on /map (any backend-agnostic source, e.g. a Nav2
-        # map server) into the local planning grid each replan cycle. Not
-        # auto-enabled by any mapping_source; defaults off.
-        self.declare_parameter('enable_slam_map',              False)
-        self.declare_parameter('slam_map_topic',               '/map')
-        self.declare_parameter('slam_map_occupied_threshold',  50)
-        self.declare_parameter('slam_map_unknown_is_obstacle', False)
-        self.declare_parameter('slam_map_max_age_sec',         5.0)
         # ── DLIO 3D map fusion ─────────────────────────────────────────
         # Set enable_dlio_map:=true to fuse DLIO's global 3D map
         # (/dlio/map_node/map) as static obstacle context (walls, furniture)
@@ -274,13 +257,6 @@ class AStarNode(Node):
         self._external_grid = None          # ExternalGridMap | None
         self._external_grid_t: float = 0.0
 
-        # SLAM map fusion config
-        self._enable_slam_map = bool(self.get_parameter('enable_slam_map').value)
-        self._slam_map_occ_thr = int(self.get_parameter('slam_map_occupied_threshold').value)
-        self._slam_map_unknown_obstacle = bool(
-            self.get_parameter('slam_map_unknown_is_obstacle').value
-        )
-        self._slam_map_max_age = float(self.get_parameter('slam_map_max_age_sec').value)
 
         # ── Algorithm objects ─────────────────────────────────────────
         # hmap is only needed for the 2.5D step-over rule; vmap only for the
@@ -332,9 +308,6 @@ class AStarNode(Node):
         # publishing starts before the first odom message arrives.
         self._pose_frame: str = 'odom'
 
-        # SLAM map state (slam_toolbox OccupancyGrid)
-        self._slam_map: OccupancyGrid | None = None
-        self._slam_map_t: float = 0.0
 
         # DLIO 3D map state (global /dlio/map_node/map, odom frame, keyframe-rate)
         self._enable_dlio_map = bool(self.get_parameter('enable_dlio_map').value)
@@ -407,7 +380,6 @@ class AStarNode(Node):
             ext_topic = str(self.get_parameter('external_costmap_topic').value)
             self.create_subscription(
                 Float32MultiArray, ext_topic, self._external_costmap_cb, 10)
-            self._enable_slam_map = False
             self._enable_dlio_map = False
             self.get_logger().info(
                 f"costmap backend: external_grid  topic={ext_topic}  "
@@ -420,25 +392,6 @@ class AStarNode(Node):
             self.get_logger().info(
                 f"costmap backend: gaussian  obstacle source: {self._obstacle_topic}")
 
-        if self._enable_slam_map:
-            slam_map_topic = str(self.get_parameter('slam_map_topic').value)
-            # TRANSIENT_LOCAL so a late-joining subscriber gets the last map
-            # published by slam_toolbox even before the first new scan arrives.
-            slam_qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            )
-            self.create_subscription(OccupancyGrid, slam_map_topic, self._slam_map_cb, slam_qos)
-            self.get_logger().info(
-                f'SLAM map fusion: enabled  topic={slam_map_topic}  '
-                f'occ_threshold={self._slam_map_occ_thr}  '
-                f'unknown_is_obstacle={self._slam_map_unknown_obstacle}  '
-                f'max_age={self._slam_map_max_age}s'
-            )
-        else:
-            self.get_logger().info('SLAM map fusion: disabled (enable_slam_map=false)')
 
         if self._enable_dlio_map:
             dlio_map_topic = str(self.get_parameter('dlio_map_topic').value)
@@ -714,11 +667,6 @@ class AStarNode(Node):
             # Just decay the persistent map; don't clobber self._lidar_points.
             self._persistent_map.update(None, now)
 
-    def _slam_map_cb(self, msg: OccupancyGrid) -> None:
-        """Cache the latest SLAM map from slam_toolbox."""
-        self._slam_map = msg
-        self._slam_map_t = self.get_clock().now().nanoseconds * 1e-9
-
     def _dlio_map_cb(self, msg: PointCloud2) -> None:
         """Cache DLIO's global 3D map (/dlio/map_node/map) as an (N,3) array."""
         try:
@@ -798,59 +746,6 @@ class AStarNode(Node):
             return
         self._external_grid = grid
         self._external_grid_t = self.get_clock().now().nanoseconds * 1e-9
-
-    # ── SLAM map fusion ───────────────────────────────────────────────
-
-    def _extract_slam_obstacle_points(self, robot_xy: np.ndarray) -> np.ndarray | None:
-        """Resolve the map→odom TF then delegate to slam_map_utils."""
-        if not self._enable_slam_map or self._slam_map is None:
-            return None
-
-        map_frame = self._slam_map.header.frame_id or 'map'
-
-        # Look up map → odom transform; fall back to identity (map == odom)
-        # when slam_toolbox is not running or TF is not yet available.
-        dx, dy, yaw = 0.0, 0.0, 0.0
-        try:
-            tf = self._tf_buffer.lookup_transform(
-                self._pose_frame,
-                map_frame,
-                rclpy.time.Time(),
-                Duration(seconds=0.1),
-            )
-            dx = tf.transform.translation.x
-            dy = tf.transform.translation.y
-            qx = tf.transform.rotation.x
-            qy = tf.transform.rotation.y
-            qz = tf.transform.rotation.z
-            qw = tf.transform.rotation.w
-            yaw = math.atan2(2.0 * (qw * qz + qx * qy),
-                             1.0 - 2.0 * (qy * qy + qz * qz))
-        except tf2_ros.LookupException:
-            pass  # map == odom; identity is correct
-        except Exception as exc:
-            self.get_logger().warning(
-                f'[A*-SLAM] TF lookup failed: {exc!r} — assuming map==odom',
-                throttle_duration_sec=5.0,
-            )
-
-        now = self.get_clock().now().nanoseconds * 1e-9
-        return extract_slam_obstacle_points(
-            slam_map=self._slam_map,
-            slam_map_t=self._slam_map_t,
-            now=now,
-            slam_map_max_age=self._slam_map_max_age,
-            slam_map_occ_thr=self._slam_map_occ_thr,
-            slam_map_unknown_obstacle=self._slam_map_unknown_obstacle,
-            robot_xy=robot_xy,
-            grid_half_width=self._grid_map.half_width,
-            planning_height=self._planning_height,
-            pose_frame=self._pose_frame,
-            tf_dx=dx,
-            tf_dy=dy,
-            tf_yaw=yaw,
-            logger=self.get_logger(),
-        )
 
     # ── DLIO 3D map fusion ──────────────────────────────────────────────
 
@@ -987,15 +882,6 @@ class AStarNode(Node):
         )
         if persistent_pts is not None:
             direct_list.append(persistent_pts)
-
-        # Fuse SLAM map occupied cells (slam_toolbox 2D OccupancyGrid).
-        slam_pts = self._extract_slam_obstacle_points(drone_xy)
-        if slam_pts is not None:
-            direct_list.append(slam_pts)
-            self.get_logger().debug(
-                f'[A*-SLAM] fused {len(slam_pts)} cells from SLAM map',
-                throttle_duration_sec=2.0,
-            )
 
         # Fuse DLIO's global 3D map (cropped to local window, floor stripped) —
         # static context from structures no longer in the live sensor's FOV.
