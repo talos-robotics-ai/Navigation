@@ -92,6 +92,13 @@ def generate_launch_description():
         executable='livox_ros_driver2_node',
         name='livox_lidar_publisher',
         output='screen',
+        # Auto-recover if the driver process dies (or is killed by scripts/livox_watchdog.sh
+        # when the MID-360 goes buggy and stops publishing — a known intermittent HW hiccup
+        # that otherwise silently blinds DLIO + local_voxel_map). respawn_delay avoids a tight
+        # loop if the device is truly down. NOTE: the driver ignores SIGINT, so on a normal
+        # Ctrl-C shutdown the launch's SIGKILL backstop (autonomy.sh) still cleans it up.
+        respawn=True,
+        respawn_delay=3.0,
         parameters=[
             {'xfer_format': 0},        # 0 = PointCloud2 (PointXYZRTLT) for DLIO
             {'multi_topic': 0},

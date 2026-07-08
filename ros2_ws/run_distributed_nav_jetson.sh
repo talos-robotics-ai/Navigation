@@ -8,9 +8,13 @@
 #
 #   LAPTOP_IP=10.251.100.88 ./run_distributed_nav_jetson.sh
 #
-# Everything here is pinned to cores 0,1 (the controller owns 2-5). e-stop runs in the
-# FOREGROUND of this terminal (s=stop g=go q=quit) — the primary software stop stays
-# on the robot, never only on the laptop.
+# Everything here is pinned to cores 0,1,2 (the SONIC controller owns 3-5 — the validated
+# 3/3 core split, SONIC_REAL_BRINGUP.md §6a). Perception load is motion-dependent
+# (local_voxel_map grows as the voxel map populates with obstacles) and needs 3 cores;
+# SONIC is GPU-bound (~11% CPU across its cores) so 3 cores keeps its 500 Hz loop and
+# LowState receive threads healthy. Start SONIC with scripts/start_sonic_pinned.sh so its
+# threads land on 3,4,5. e-stop runs in the FOREGROUND of this terminal (s=stop g=go q=quit)
+# — the primary software stop stays on the robot, never only on the laptop.
 set -uo pipefail
 LAPTOP_IP="${LAPTOP_IP:?set LAPTOP_IP=<laptop wifi ip>  (e.g. LAPTOP_IP=10.251.100.88)}"
 HOLD_ARMS="${HOLD_ARMS:-true}"
@@ -22,7 +26,12 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 set -u
 export ROS_DOMAIN_ID=42
-NAV=(taskset -c "${NAV_CPUS:-0,1}")
+# DLIO's nano-GICP/deskew use OpenMP; with OMP_NUM_THREADS unset it spawns one thread
+# per VISIBLE core (6) even though it's taskset-pinned to the nav cores -> oversubscription
+# + context-switch thrash. Cap it to leave headroom for the Livox driver + local_voxel_map
+# that share these cores (DLIO is ~28 ms/100 ms budget, not the bottleneck, so it stays fast).
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
+NAV=(taskset -c "${NAV_CPUS:-0,1,2}")
 
 cleanup() {
   echo ">> stopping distributed-nav (Jetson) ..."
@@ -35,7 +44,7 @@ cleanup() {
 trap cleanup INT TERM
 
 # 1. Perception: DLIO + local_voxel_map (NO A*/MPC here anymore)
-echo ">> [1/3] localization (DLIO + local map), pinned to CPUs ${NAV_CPUS:-0,1} ..."
+echo ">> [1/3] localization (DLIO + local map), pinned to CPUs ${NAV_CPUS:-0,1,2} ..."
 tmux kill-session -t dnav_loc 2>/dev/null || true
 tmux new-session -d -s dnav_loc "${NAV[*]} ros2 launch g1_bringup real_localization.launch.py rviz:=false > /tmp/dnav_localization.log 2>&1"
 sleep 4   # DLIO IMU/gravity init — keep the robot still
@@ -55,7 +64,10 @@ tmux new-session -d -s dnav_gaitbridge "${NAV[*]} ros2 run g1_sim_bridge cmd_vel
 # CloudRegistered + LocalVoxelMap show in g1_dlio.rviz — ~2.5 MB/s, WiFi-safe. OFF by default.
 # RELAY_MAP=1 ALSO ships /dlio/map_node/map, which ACCUMULATES without bound (same failure
 # class as the path) and creeps up WiFi over a long run — enable only for a quick look.
-SEND_TOPICS="/dlio/odom_node/odom:nav_msgs/msg/Odometry,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2,/local_voxel_map/costmap:nav_msgs/msg/OccupancyGrid"
+# odom is throttled to 20 Hz for the wire (@20): DLIO publishes it at 100 Hz but the
+# off-board A*/MPC only need ~10-20 Hz, and 100 Hz through the relay is wasted CPU +
+# queue churn. The Jetson-local gait bridge still sees the full 100 Hz odom (not relayed).
+SEND_TOPICS="/dlio/odom_node/odom:nav_msgs/msg/Odometry@20,/tf:tf2_msgs/msg/TFMessage,/tf_static:tf2_msgs/msg/TFMessage,/local_voxel_map/obstacles:sensor_msgs/msg/PointCloud2,/local_voxel_map/costmap:nav_msgs/msg/OccupancyGrid"
 if [ "${RELAY_CLOUDS:-0}" = "1" ]; then
   echo ">> RELAY_CLOUDS=1: ALSO shipping deskewed scan + voxel grid (~2.5 MB/s)"
   SEND_TOPICS="${SEND_TOPICS},/dlio/odom_node/pointcloud/deskewed:sensor_msgs/msg/PointCloud2,/local_voxel_map/voxel_grid:sensor_msgs/msg/PointCloud2"

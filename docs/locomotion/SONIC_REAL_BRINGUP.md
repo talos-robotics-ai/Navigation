@@ -103,18 +103,13 @@ policy takes control and the robot assumes a standing stance, so keep it suspend
 and let it settle.
 
 ```bash
-# terminal 1  (in the SONIC deploy repo)
-cd ~/groot/sonic-g1-locomotion
-# GR00T_DIR MUST go INSIDE the tmux command: a detached tmux session runs a fresh
-# non-interactive shell that does NOT inherit ad-hoc `export`s or source ~/.bashrc,
-# so `export GR00T_DIR=...` before `tmux new-session` is silently lost (env.sh then
-# uses its wrong default path). taskset -c 2-5 confines ALL of the controller's
-# threads — including the CycloneDDS LowState receive threads (recvUC/dq.*), which
-# SONIC_CPU_MAIN does NOT pin — to the RT cores, so the nav stack (on 0,1) can't
-# starve LowState -> fall. SONIC_CPU_MAIN=2 keeps the main thread in that set. See §6a.
-tmux new-session -d -s sdeploy "GR00T_DIR=\$HOME/groot/GR00T-WholeBodyControl SONIC_CPU_MAIN=2 taskset -c 2-5 scripts/start_deploy_real.sh > /tmp/sonic_deploy_real.log 2>&1"
-until grep -qE "Init Done|out of memory" /tmp/sonic_deploy_real.log; do sleep 2; done
-grep "\[RT\]" /tmp/sonic_deploy_real.log     # expect FIFO+pin lines for all 4 workers
+# terminal 1 — use the wrapper: it sets the 3/3 SONIC_CPU_* mapping (control->5,
+# command_writer->4, main+input+planner->3), wraps the launch in `taskset -c 3-5` so
+# EVERY thread — including the unpinned CycloneDDS LowState receive threads
+# (recvUC/dq.*) — is confined to the RT cores, and VERIFIES that before returning
+# (loud warning if any thread escaped to the nav cores). See §6a.
+TMUX=1 ~/Navigation/ros2_ws/scripts/start_sonic_pinned.sh
+# (the wrapper waits for Init Done and prints the four [RT] lines itself)
 ```
 **Verify:** `Init Done`, four `[RT]` lines, and NOT repeating `LowState is not
 available` (that means the robot link/state is down — recheck `ping 192.168.123.161`
@@ -246,16 +241,17 @@ On its own exit the bridge sends IDLE then `command{stop=1}` to the controller.
 
 ## 6a. CPU isolation — prevent LowState starvation (falls)
 
-The Orin Nano has **6 cores**. The SONIC controller pins its RT threads to cores
-**2,3,4,5** (`SONIC_CPU_*` in the SONIC repo's `scripts/env.sh`) — but **only** those
-four RT threads. Two other sets of threads are **not** pinned by `SONIC_CPU_*`:
+The Orin Nano has **6 cores**. We use a **3/3 split**: perception + relay own cores
+**0,1,2**, the SONIC controller owns **3,4,5**. The controller pins its four RT worker
+threads with `SONIC_CPU_*` (in the SONIC repo's `scripts/env.sh`) — but **only** those
+four. Two other sets of threads are **not** pinned by `SONIC_CPU_*`:
 
-- the **main thread** (`SONIC_CPU_MAIN`, default **0**), and
+- the **main thread** (`SONIC_CPU_MAIN`), and
 - the **CycloneDDS worker threads** (`recvUC`, `recv`, `dq.builtins`, `rlsnr`, …) that
   actually **deliver LowState** from the robot — these float on the general pool
-  (observed on CPUs 0 and 1).
+  (observed on CPUs 0,1 when the controller is started without an outer `taskset`).
 
-So if the nav stack / DDS / remote viz saturate cores 0–1, the LowState receive
+So if the nav stack / DDS / remote viz saturate the nav cores, the LowState receive
 threads starve and the controller trips:
 
 ```
@@ -266,34 +262,55 @@ threads starve and the controller trips:
 (`ping 192.168.123.161` stays 0% loss); it is CPU contention. It happened once with
 the full nav stack + a Foxglove bridge feeding a laptop subscribed to `/livox/lidar`.
 
+**Measured (real G1, 2026-07).** A normal-priority thread (like a DDS LowState receive
+thread) on a nav core under load sees **p99 5.6 ms / max 15 ms** scheduling stalls;
+on a clean controller core it sees **72 µs**. LowState arrives at ~500 Hz (2 ms), so a
+5–15 ms stall drops 2–7 frames → the trip above. With the controller confined to its
+own cores, LowState age stayed ~5 ms (p50) with **0 losses** even while the nav cores
+ran at 80–94% — so the fix is purely *isolation*, not more compute.
+
+**Why 3/3 and not the old 2/4 (nav on 0,1 · SONIC on 2–5).** Perception load is
+motion-dependent: when the robot moves, `local_voxel_map` populates and becomes the
+top nav-core cost, pushing 2 nav cores to **94/87%** (near-saturation → relay jitter →
+gait stutter). SONIC is GPU-bound (~11% CPU across its cores), so giving it 3 cores
+instead of 4 costs it **nothing** (LowState age was identical, 0 losses) while the nav
+side dropped to ~80%. Net: hand SONIC's 4th core to the starved nav side.
+
 **The fix — keep the controller's cores exclusively for the controller:**
 
 1. **Confine the *whole* controller (RT loop + main + DDS/LowState threads) to cores
-   2–5** by starting it under `taskset -c 2-5`, with `SONIC_CPU_MAIN=2` so the main
-   thread stays inside that set. `taskset` sets the process affinity mask; the RT
-   threads still pin to their own cores (2–5, inside the mask) while the unpinned
-   DDS/main threads inherit the mask instead of floating onto 0,1:
+   3–5.** Use the wrapper — it sets `SONIC_CPU_*` (control→5, command_writer→4,
+   main+input+planner→3), wraps the launch in `taskset -c 3-5`, and **verifies** every
+   thread (incl. `recvUC`/`dq.*`) landed on 3–5 before returning:
    ```bash
-   SONIC_CPU_MAIN=2 taskset -c 2-5 scripts/start_deploy_real.sh
+   ros2_ws/scripts/start_sonic_pinned.sh          # foreground
+   TMUX=1 ros2_ws/scripts/start_sonic_pinned.sh   # detached tmux 'sdeploy'
    ```
-   (`SONIC_CPU_MAIN=2` alone is **not** enough — it leaves the DDS/LowState threads on
-   0,1. `taskset -c 2-5` is what moves them off.)
-2. **Pin everything else to cores 0,1.** `autonomy.sh` and `ros2_ws/start_foxglove.sh`
-   do this automatically (`taskset -c 0,1`, override/disable with `NAV_CPUS`). Nothing
-   the nav side runs touches cores 2–5.
-3. **(Robust, needs a reboot) Hard-isolate the controller cores** so even kernel/IRQ
-   work stays off them. Add to the Jetson boot args (`/boot/extlinux/extlinux.conf`,
-   append to the `APPEND` line): `isolcpus=2-5 nohz_full=2-5 rcu_nocbs=2-5`, then
-   `sudo reboot`. Verify with `cat /sys/devices/system/cpu/isolated` → `2-5`.
+   The outer `taskset -c 3-5` is the load-bearing part: `SONIC_CPU_*` alone leaves the
+   unpinned DDS/main threads floating onto the nav cores. **Never start SONIC without it.**
+2. **Pin everything else to cores 0,1,2.** `autonomy.sh`, `run_distributed_nav_jetson.sh`,
+   `run_teleop_jetson.sh` and `start_foxglove.sh` do this automatically
+   (`taskset -c 0,1,2`, override/disable with `NAV_CPUS`). Nothing the nav side runs
+   touches cores 3–5.
+3. **(Optional hardening — needs a reboot) Hard-isolate the controller cores** so even
+   kernel housekeeping (kworkers, RCU callbacks, timer ticks) stays off them, shaving
+   the last rare tail-jitter spikes. Steps 1+2 (pinning + IRQ steering) already gave
+   **0 LowState losses** in testing even at 94% nav load, so this is a "last 5%" layer,
+   not a requirement — add it only if you still see rare LowState blips under heavy real
+   load. It does **not** cost nav any throughput (nav is pinned to 0,1,2 either way) and
+   does **not** slow SONIC (its threads are explicitly pinned; inference is on the GPU).
+   Add to the Jetson boot args (`/boot/extlinux/extlinux.conf`, append to **both**
+   `APPEND` lines — `DEFAULT` is `JetsonIO`): `isolcpus=3-5 nohz_full=3-5 rcu_nocbs=3-5`,
+   then `sudo reboot`. Verify with `cat /sys/devices/system/cpu/isolated` → `3-5`.
 
-Verify the isolation on a running controller (all threads should show PSR 2–5):
+Verify the isolation on a running controller (all threads should show PSR 3–5):
 ```bash
 ps -L -o tid,psr,comm -p "$(pgrep -f '[g]1_deploy_onnx_ref')"
 ```
 
 !!! tip "Heavy viz is safer now, but still be conservative"
-    With `taskset -c 2-5` the LowState threads no longer share cores with the nav
-    stack, so remote viz is far safer. Cores 0,1 are still finite, though — while
+    With `taskset -c 3-5` the LowState threads no longer share cores with the nav
+    stack, so remote viz is far safer. Cores 0,1,2 are still finite, though — while
     balancing, prefer light Foxglove topics over raw `/livox/lidar` / point clouds.
     See [Remote visualization](../system/REMOTE_VISUALIZATION.md).
 
@@ -312,7 +329,7 @@ ps -L -o tid,psr,comm -p "$(pgrep -f '[g]1_deploy_onnx_ref')"
 | robot **slower** than commanded | expected ~0.85×; `speed_gain` (default 1.18) compensates, and the MPC closes the speed loop from odom. |
 | robot **won't turn** | `facing_lookahead_sec` must be > 0 (default 0.4). It's the whole turning mechanism in the closed-loop bridge. |
 | DLIO pose drifts / diverges at start | robot moved during the ~3 s IMU/gravity init — restart localization with the robot held still. |
-| periodic `soft-holding` / `MotorCommand stale` | SONIC state logging left on (keep OFF on hardware) or memory pressure. |
+| `soft-holding` / `MotorCommand stale` at startup | benign: the controller soft-holds until the gait bridge sends the planner handshake — start `autonomy.sh` promptly after `Init Done`. If it recurs *mid-run*: SONIC state logging left on (keep OFF on hardware) or memory pressure. |
 | `[RT]` lines missing | launched from a stale shell — `ulimit -r` must be 99; re-login/fresh tmux after `setup_rt_limits.sh`. |
 
 ---
@@ -324,13 +341,13 @@ ps -L -o tid,psr,comm -p "$(pgrep -f '[g]1_deploy_onnx_ref')"
 sudo bash -c "sync; echo 3 > /proc/sys/vm/drop_caches"
 pkill -9 -f "[g]1_deploy_onnx_ref" 2>/dev/null || true
 
-# term 1 — SONIC controller FIRST (robot HOISTED). taskset -c 2-5 keeps ALL its
-# threads (incl. DDS/LowState) off the nav cores 0,1 so it can't be starved -> fall (§6a).
-cd ~/groot/sonic-g1-locomotion
-export GR00T_DIR=$HOME/groot/GR00T-WholeBodyControl
-SONIC_CPU_MAIN=2 taskset -c 2-5 scripts/start_deploy_real.sh                      # wait "Init Done"
+# term 1 — SONIC controller FIRST (robot HOISTED). The wrapper pins ALL its threads
+# (incl. DDS/LowState) to cores 3-5 and verifies it, so it can't be starved -> fall (§6a).
+~/Navigation/ros2_ws/scripts/start_sonic_pinned.sh                # wait "Init Done" (wrapper does)
 
-# term 2 — localization + planner + SONIC bridge + e-stop (auto-pinned to cores 0,1)
+# term 2 — localization + planner + SONIC bridge + e-stop (auto-pinned to cores 0,1,2).
+# Start it PROMPTLY after Init Done: the controller soft-holds ("MotorCommand stale")
+# until the bridge sends the planner handshake — a long gap is a benign soft-hold.
 cd ~/Navigation/ros2_ws && GAIT=sonic ./autonomy.sh               # e-stop: s=STOP g=GO q=quit
 
 # then: RViz "2D Goal Pose" -> /global_goal

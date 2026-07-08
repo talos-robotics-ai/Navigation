@@ -17,7 +17,13 @@
 
     # ── rolling window / voxelisation ──────────────────────────────────────
     half_width:    8.0    # local map half-extent (m); total window = 2*half_width
-    voxel_size:    0.10   # 3D voxel edge (m) — also the costmap resolution
+    # voxel_size is the #1 CPU-vs-quality knob for this node. Its per-scan cost scales
+    # with the number of accumulated voxels, which grows as the robot MOVES and the map
+    # populates with obstacles — measured to push the (shared) nav cores from ~44% to
+    # ~80% under motion. Coarsening cuts that cost (~1/size^2 in the 2D costmap): 0.12
+    # is a mild default with negligible impact for a humanoid; drop to 0.15 for more
+    # headroom on a loaded Orin, or 0.05 for fine detail (LOCAL_VOXEL_MAP.md) at higher CPU.
+    voxel_size:    0.12   # 3D voxel edge (m) — also the costmap resolution
     persistence_s: 3.0    # voxel memory before temporal decay (s); densifies sparse MID-360
 
     # ── ground removal (per-cell LOCAL-MINIMUM filter, on accumulated cloud) ──

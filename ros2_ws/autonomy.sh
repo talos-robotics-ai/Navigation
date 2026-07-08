@@ -79,20 +79,29 @@ OFFBOARD=false
 JETSON_IP="${JETSON_IP:-}"
 [[ -n "${JETSON_IP}" ]] && OFFBOARD=true
 
-# ── CPU isolation from the SONIC controller ──────────────────────────────────
-# On the 6-core Orin Nano the SONIC controller pins its RT threads to cores 2-5.
-# If the nav stack (+ DDS + any remote viz) competes for those cores it can starve
-# the controller's 500 Hz loop / LowState DDS thread -> "Lost LowState data
-# connection" -> safety-stop -> the robot FALLS (this happened once). So pin every
-# process THIS script starts to the nav cores 0,1 only. Pair it with starting the
-# controller as  SONIC_CPU_MAIN=2 scripts/start_deploy_real.sh  (moves its main/
-# LowState thread off core 0 onto the isolated set), and optionally isolcpus=2-5 at
-# boot. See docs/locomotion/SONIC_REAL_BRINGUP.md §6a. NAV_CPUS="" disables pinning.
-if $OFFBOARD; then NAV_CPUS="${NAV_CPUS:-}"; else NAV_CPUS="${NAV_CPUS:-0,1}"; fi
+# ── CPU isolation from the SONIC controller (validated 3/3 split) ────────────
+# On the 6-core Orin Nano the SONIC controller owns cores 3-5 and the nav stack owns
+# cores 0,1,2. If the nav stack (+ DDS + network softirqs + any remote viz) competes
+# for the controller's cores it can starve its 500 Hz loop / LowState DDS receive
+# thread -> "Lost LowState data connection" -> safety-stop -> the robot FALLS (this
+# happened once). Measured (2026-07): a thread on a nav core under load sees 5-15 ms
+# scheduling stalls vs 72 us on a clean core -> misses LowState frames -> fall. The
+# fix is core isolation: pin every process THIS script starts to nav cores 0,1,2, and
+# start the controller with  scripts/start_sonic_pinned.sh  (taskset -c 3-5 confines
+# ALL its threads, incl. the CycloneDDS recvUC/dq LowState threads, to 3-5). Also set
+# isolcpus=3-5 nohz_full=3-5 rcu_nocbs=3-5 at boot. Perception needs 3 cores because
+# local_voxel_map cost grows with the populated voxel map when the robot moves; SONIC
+# is GPU-bound (~11% CPU) so 3 cores keep LowState healthy (verified: identical
+# LowState age vs the old 2/4 split). See SONIC_REAL_BRINGUP.md §6a. NAV_CPUS="" off.
+if $OFFBOARD; then NAV_CPUS="${NAV_CPUS:-}"; else NAV_CPUS="${NAV_CPUS:-0,1,2}"; fi
+# Cap DLIO's OpenMP threads on-board (unset -> 6 threads, one per visible core, over-
+# subscribing the pinned nav cores). Off-board the laptop planner isn't OMP-heavy; leave
+# it. See run_distributed_nav_jetson.sh for the rationale.
+$OFFBOARD || export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 TASKSET=()
 if [[ -n "${NAV_CPUS}" ]] && command -v taskset >/dev/null 2>&1; then
     TASKSET=(taskset -c "${NAV_CPUS}")
-    echo ">> pinning nav stack to CPUs ${NAV_CPUS} (keeps cores 2-5 free for the SONIC controller)"
+    echo ">> pinning nav stack to CPUs ${NAV_CPUS} (keeps cores 3-5 free for the SONIC controller)"
 fi
 
 # Which gait consumes /mpc/cmd_vel (forwarded to planner.launch.py). The bridge
@@ -106,7 +115,7 @@ HOLD_ARMS="${HOLD_ARMS:-false}"
 GAIT="${GAIT:-amo}"
 case "${GAIT}" in
     amo)     GAIT_NOTE="Start the AMO gait:  AUTONOMOUS=1 NET_IF=<nic> ./docker/run_amo.sh" ;;
-    sonic)   GAIT_NOTE="SONIC controller must ALREADY be running (start it FIRST): cd ~/groot/sonic-g1-locomotion && scripts/start_deploy_real.sh" ;;
+    sonic)   GAIT_NOTE="SONIC controller must ALREADY be running (start it FIRST, pinned to cores 3-5): ros2_ws/scripts/start_sonic_pinned.sh" ;;
     unitree) GAIT_NOTE="Bring the robot to walking control first (see docs/locomotion/UNITREE_GAIT.md)." ;;
     *)       GAIT_NOTE="gait:=${GAIT}" ;;
 esac

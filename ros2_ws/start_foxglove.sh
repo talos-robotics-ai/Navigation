@@ -60,11 +60,11 @@ export ROS_DOMAIN_ID="$DOMAIN"
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI="file://$CFG"
 
-# Pin the bridge to the nav cores (0,1) so it can NEVER compete with the SONIC
-# controller's RT cores (2-5). Serialising heavy topics (point clouds) is exactly
+# Pin the bridge to the nav cores (0,1,2) so it can NEVER compete with the SONIC
+# controller's RT cores (3-5). Serialising heavy topics (point clouds) is exactly
 # what starved the controller's LowState thread and dropped the robot. NAV_CPUS=""
 # disables. See docs/system/REMOTE_VISUALIZATION.md.
-NAV_CPUS="${NAV_CPUS:-0,1}"
+NAV_CPUS="${NAV_CPUS:-0,1,2}"
 TASKSET=()
 if [[ -n "${NAV_CPUS}" ]] && command -v taskset >/dev/null 2>&1; then
     TASKSET=(taskset -c "${NAV_CPUS}")
