@@ -4,6 +4,20 @@ Driven by PnpFsm.update(Inputs) at ~10 Hz; returns Outputs. Every transition is 
     PNP: A -> B (reason)
 Safety contract: the robot only moves (non-zero vx/wz) in NAV_TO_PREGRASP, ALIGN and
 NAV_TO_PLACE. Everywhere else the output velocity is exactly zero (the robot stands balancing).
+
+Bring-up (Params.bringup, for the on-robot RL walker): the same hanging-to-walking handover as the
+teleop stack (deployment_from_mac teleop/robot_control/x2_lower.py), driven by the walker's own
+phases (Inputs.walker_phase: ramp|glide|stance|blend|live|damped|stopped):
+    BRINGUP      walker ramping stiffness / gliding the hanging legs onto the gait's phase-0 stance
+    STANCE_WAIT  stance held open-ended; the operator lowers the gantry until the feet are flat and
+                 the robot is upright, then requests the engage
+    ENGAGE       engage sent; the walker's pose-parity gate (legs+waist within 0.15 rad of the
+                 stance) accepts -> blend, or refuses -> back to STANCE_WAIT with the joint named
+    BLEND        the policy takes the legs over (1 s)
+    READY        the policy is balancing; the hook is still on. The operator releases the hook and
+                 confirms ("released") -> WAIT_FOR_BOX
+The walker ignores vx/wz until it is live; this machine outputs zero velocity in all of these
+states anyway. A walker that drops to damped/stopped anywhere -> FAILED (walker down).
 """
 import enum
 import math
@@ -16,6 +30,11 @@ from .keyframes import ArmMotion, Keyframes
 
 
 class State(enum.Enum):
+    BRINGUP = 'BRINGUP'
+    STANCE_WAIT = 'STANCE_WAIT'
+    ENGAGE = 'ENGAGE'
+    BLEND = 'BLEND'
+    READY = 'READY'
     WAIT_FOR_BOX = 'WAIT_FOR_BOX'
     NAV_TO_PREGRASP = 'NAV_TO_PREGRASP'
     ALIGN = 'ALIGN'
@@ -44,11 +63,23 @@ class Event(enum.Enum):
     FAIL = 'failure'
     ESTOP = 'estop'
     RESET = 'reset'
+    IN_STANCE = 'walker in stance'
+    ENGAGE_REQ = 'engage requested'
+    GATE_OK = 'gate accepted'
+    GATE_REFUSED = 'gate refused'
+    LIVE = 'walker live'
+    RELEASED = 'hook released'
+    WALKER_DOWN = 'walker down'
 
 
 S, E = State, Event
 # The ONE transition table: state -> {event: next state}.
 TRANSITIONS = {
+    S.BRINGUP: {E.IN_STANCE: S.STANCE_WAIT},
+    S.STANCE_WAIT: {E.ENGAGE_REQ: S.ENGAGE},
+    S.ENGAGE: {E.GATE_OK: S.BLEND, E.GATE_REFUSED: S.STANCE_WAIT, E.LIVE: S.READY},
+    S.BLEND: {E.LIVE: S.READY},
+    S.READY: {E.RELEASED: S.WAIT_FOR_BOX},
     S.WAIT_FOR_BOX: {E.START_OK: S.NAV_TO_PREGRASP},
     S.NAV_TO_PREGRASP: {E.ARRIVED: S.ALIGN, E.BOX_LOST: S.WAIT_FOR_BOX},
     S.ALIGN: {E.ALIGNED: S.SETTLE, E.BOX_LOST: S.WAIT_FOR_BOX},
@@ -64,7 +95,10 @@ TRANSITIONS = {
     S.DONE: {}, S.FAILED: {}, S.ESTOP: {},
 }
 # Valid from any state (looked up when the state's own row has no entry).
-GLOBAL = {E.ESTOP: S.ESTOP, E.RESET: S.WAIT_FOR_BOX, E.TIMEOUT: S.FAILED, E.FAIL: S.FAILED}
+GLOBAL = {E.ESTOP: S.ESTOP, E.RESET: S.WAIT_FOR_BOX, E.TIMEOUT: S.FAILED, E.FAIL: S.FAILED,
+          E.WALKER_DOWN: S.FAILED}
+BRINGUP_STATES = (S.BRINGUP, S.STANCE_WAIT, S.ENGAGE, S.BLEND, S.READY)
+WALKER_DOWN_PHASES = ('damped', 'stopped')
 
 MOVING_STATES = (S.NAV_TO_PREGRASP, S.ALIGN, S.NAV_TO_PLACE)
 
@@ -115,6 +149,10 @@ class Params:
     settle_time: float = 1.5
     # False: no arm/hand stage -- after SETTLE the task is DONE, standing (the vendor `mc` walker owns the arms)
     manipulation: bool = True
+    # True: start in BRINGUP and run the teleop's hanging-to-walking handover through the walker's
+    # phases (on-robot RL walker). False: start in WAIT_FOR_BOX (vendor `mc` walker, already standing).
+    bringup: bool = False
+    engage_timeout: float = 5.0         # ENGAGE: no gate verdict / blend within this -> back to STANCE_WAIT
     # manipulation
     arm_default: List[float] = field(default_factory=lambda: [
         0.3, 0.2, 0.0, -0.8, 0.0, 0.0, 0.0, 0.3, -0.2, 0.0, -0.8, 0.0, 0.0, 0.0])
@@ -141,6 +179,8 @@ class Inputs:
     planner_age: float = math.inf
     nav_state: str = ''
     estop: bool = False
+    walker_phase: Optional[str] = None                     # ramp|glide|stance|blend|live|damped|stopped
+    engage_result: Optional[dict] = None                   # walker's last gate verdict {verdict, reason, seq?}
 
 
 @dataclass
@@ -151,14 +191,19 @@ class Outputs:
     arm: Optional[List[float]] = None       # None = policy default (empty arm_cmd)
     hand: Optional[List[float]] = None      # None = policy default (open)
     goal: Optional[Tuple[float, float, float]] = None   # publish on /global_goal when not None
+    engage: bool = False                    # one-shot: ask the walker to engage (only in ENGAGE)
 
 
 class PnpFsm:
     def __init__(self, params: Params, keyframes: Keyframes,
                  log: Callable[[str], None] = print):
         self.p, self.kf, self.log = params, keyframes, log
-        self.state = State.WAIT_FOR_BOX
+        self.state = State.BRINGUP if params.bringup else State.WAIT_FOR_BOX
         self.start_pending = params.auto_start
+        self._engage_pending = False
+        self._released_pending = False
+        self._engage_sent = False
+        self._gate_seen = None              # engage_result object at the time ENGAGE was entered
         self._enter_t = 0.0
         self._reset_flag = False
         self._seen = 0                      # consecutive crate frames
@@ -198,6 +243,14 @@ class PnpFsm:
     def request_reset(self):
         self._reset_flag = True
 
+    def request_engage(self):
+        """Operator: feet flat, robot upright under the gantry -> hand the legs to the policy."""
+        self._engage_pending = True
+
+    def request_released(self):
+        """Operator: the hook is released, the robot stands on its own under the policy."""
+        self._released_pending = True
+
     # ---------------- transition machinery
     def _next(self, event: Event) -> Optional[State]:
         row = TRANSITIONS[self.state]
@@ -209,6 +262,8 @@ class PnpFsm:
             return False
         if nxt == S.REACH and not self.p.manipulation:
             nxt, reason = S.DONE, reason + '; manipulation off'
+        if event == Event.RESET and self.p.bringup and inp.walker_phase != 'live':
+            nxt, reason = S.BRINGUP, reason + f'; walker {inp.walker_phase or "absent"}, bring-up first'
         self.log(f'PNP: {self.state.name} -> {nxt.name} ({reason})')
         prev, self.state = self.state, nxt
         self._enter(prev, inp)
@@ -221,6 +276,13 @@ class PnpFsm:
         self._motion = None
         self._pending_goal = None
         self._align_cmd = (0.0, 0.0)
+        if self.state in (State.BRINGUP, State.STANCE_WAIT):
+            self._engage_pending = False
+        elif self.state == State.ENGAGE:
+            self._engage_sent = False
+            self._gate_seen = inp.engage_result
+        elif self.state == State.READY:
+            self._released_pending = False
         if self.state == State.WAIT_FOR_BOX:
             self._arm_hold = self._hand_hold = self._last_arm_cmd = None
             self._seen = 0
@@ -291,8 +353,14 @@ class PnpFsm:
             else:
                 self._fire(Event.RESET, 'reset requested', inp)
 
+        if (self.p.bringup and inp.walker_phase in WALKER_DOWN_PHASES
+                and self.state not in (State.FAILED, State.ESTOP, State.BRINGUP)):
+            self._fire(Event.WALKER_DOWN, f'walker {inp.walker_phase}', inp)
+
         st = self.state
-        if st == State.WAIT_FOR_BOX:
+        if st in BRINGUP_STATES:
+            self._tick_bringup(inp)
+        elif st == State.WAIT_FOR_BOX:
             if self.start_pending and self._seen >= self.p.start_frames and inp.robot is not None:
                 self._fire(Event.START_OK, f'box seen {self._seen} frames, start requested', inp)
         elif st == State.NAV_TO_PREGRASP:
@@ -313,9 +381,49 @@ class PnpFsm:
 
         return self._outputs(inp)
 
+    def _tick_bringup(self, inp: Inputs):
+        ph, st = inp.walker_phase, self.state
+        if st == State.BRINGUP:
+            self._engage_pending = False
+            if ph == 'stance':
+                self._fire(Event.IN_STANCE, 'walker holds the stance; lower the gantry until the feet are flat', inp)
+            elif ph in ('blend', 'live'):
+                # already handed over (e.g. this machine restarted): follow the walker
+                self._fire(Event.IN_STANCE, f'walker already {ph}', inp)
+                self._fire(Event.ENGAGE_REQ, 'walker already engaged', inp)
+        elif st == State.STANCE_WAIT:
+            if ph in ('blend', 'live'):
+                self._fire(Event.ENGAGE_REQ, f'walker already {ph}', inp)
+            elif self._engage_pending:
+                self._engage_pending = False
+                if ph == 'stance':
+                    self._fire(Event.ENGAGE_REQ, 'operator: feet flat, engage', inp)
+                else:
+                    self.log(f'PNP: engage ignored (walker phase {ph})')
+        elif st == State.ENGAGE:
+            res = inp.engage_result
+            fresh = res is not None and res is not self._gate_seen and res != self._gate_seen
+            if ph == 'live':
+                self._fire(Event.LIVE, 'walker live', inp)
+            elif ph == 'blend':
+                self._fire(Event.GATE_OK, 'pose parity OK, blending the policy in', inp)
+            elif fresh and str(res.get('verdict', '')).startswith('refused'):
+                self._fire(Event.GATE_REFUSED, f"gate refused: {res.get('reason', '')}", inp)
+            elif inp.t - self._enter_t > self.p.engage_timeout:
+                self._fire(Event.GATE_REFUSED, f'no gate verdict within {self.p.engage_timeout}s', inp)
+        elif st == State.BLEND:
+            if ph == 'live':
+                self._fire(Event.LIVE, 'policy has the legs; release the hook, then confirm', inp)
+        elif st == State.READY:
+            if self._released_pending:
+                self._released_pending = False
+                self._fire(Event.RELEASED, 'operator: hook released', inp)
+
     def _outputs(self, inp: Inputs) -> Outputs:
         st = self.state
         out = Outputs(st, arm=self._arm_hold, hand=self._hand_hold)
+        if st == State.ENGAGE and not self._engage_sent:
+            out.engage, self._engage_sent = True, True
         if st in (State.NAV_TO_PREGRASP, State.NAV_TO_PLACE):
             out.goal, self._pending_goal = self._pending_goal, None
             visible_ok = st == State.NAV_TO_PLACE or (

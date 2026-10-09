@@ -215,3 +215,85 @@ def test_manipulation_off_ends_after_settle():
     for _ in range(10):
         f.update(c.inp(robot=(1.45, 0, 0)))
     assert f.state == State.DONE and any('manipulation off' in m for m in logs)
+
+
+# ---------------- bring-up: teleop's hanging-to-walking handover (Params.bringup)
+
+def _run(f, c, n=3, **kw):
+    o = None
+    for _ in range(n):
+        o = f.update(c.inp(**kw))
+        assert (o.vx, o.wz) == (0, 0) or f.state not in (State.BRINGUP, State.STANCE_WAIT, State.ENGAGE,
+                                                          State.BLEND, State.READY)
+    return o
+
+
+def test_bringup_full_handover():
+    f, logs = mk(bringup=True)
+    c = Clock()
+    assert f.state == State.BRINGUP
+    _run(f, c, walker_phase='ramp')
+    _run(f, c, walker_phase='glide')
+    assert f.state == State.BRINGUP
+    _run(f, c, walker_phase='stance')
+    assert f.state == State.STANCE_WAIT
+    f.request_start()                                  # a start before the handover does nothing yet
+    _run(f, c, walker_phase='stance')
+    assert f.state == State.STANCE_WAIT
+    f.request_engage()
+    o = f.update(c.inp(walker_phase='stance'))
+    assert f.state == State.ENGAGE and o.engage and (o.vx, o.wz) == (0, 0)
+    o = f.update(c.inp(walker_phase='stance'))
+    assert not o.engage                                # one-shot
+    _run(f, c, walker_phase='blend')
+    assert f.state == State.BLEND
+    _run(f, c, walker_phase='live')
+    assert f.state == State.READY
+    f.request_released()
+    f.update(c.inp(walker_phase='live'))
+    assert f.state == State.WAIT_FOR_BOX
+    assert any('STANCE_WAIT -> ENGAGE' in m for m in logs)
+
+
+def test_bringup_gate_refused_back_to_stance():
+    f, logs = mk(bringup=True)
+    c = Clock()
+    _run(f, c, walker_phase='stance')
+    f.request_engage()
+    f.update(c.inp(walker_phase='stance', engage_result={'verdict': 'ok', 'seq': 0}))
+    assert f.state == State.ENGAGE
+    f.update(c.inp(walker_phase='stance',
+                   engage_result={'verdict': 'refused', 'reason': 'left_knee 0.31 rad', 'seq': 1}))
+    assert f.state == State.STANCE_WAIT
+    assert any('left_knee' in m for m in logs)
+
+
+def test_bringup_engage_timeout_and_engage_outside_stance_ignored():
+    f, logs = mk(bringup=True, engage_timeout=1.0)
+    c = Clock()
+    _run(f, c, walker_phase='stance')
+    f.request_engage()
+    _run(f, c, n=15, walker_phase='stance')            # no verdict, never blends
+    assert f.state == State.STANCE_WAIT
+
+
+def test_walker_down_fails_and_reset_goes_back_to_bringup():
+    f, _ = mk(bringup=True)
+    c = Clock()
+    _run(f, c, walker_phase='stance')
+    f.request_engage()
+    _run(f, c, walker_phase='stance')
+    _run(f, c, walker_phase='live')
+    f.request_released()
+    _run(f, c, walker_phase='live')
+    assert f.state == State.WAIT_FOR_BOX
+    o = f.update(c.inp(walker_phase='damped'))
+    assert f.state == State.FAILED and (o.vx, o.wz) == (0, 0)
+    f.request_reset()
+    f.update(c.inp(walker_phase='damped'))
+    assert f.state == State.BRINGUP
+
+
+def test_no_bringup_starts_waiting_for_box():
+    f, _ = mk()
+    assert f.state == State.WAIT_FOR_BOX

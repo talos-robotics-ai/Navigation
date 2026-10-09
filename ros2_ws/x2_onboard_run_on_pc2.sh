@@ -172,9 +172,11 @@ case "${1:-}" in
   reset) trigger reset ;;
   estop) trigger estop ;;
   clear) trigger clear ;;
+  engage) trigger engage ;;
+  released) trigger released ;;
   start) shift; cmd_start "$@" ;;
   stop) cmd_stop ;;
   status) cmd_status ;;
   log) cmd_log ;;
-  *) echo "usage: run_nav_on_pc2.sh start [mc]|stop|status|log|go|estop|clear|reset   (env: NAV_MODE=relay|full, NAV_ARGS, NAV_KILVO, NAV_ROS_DOMAIN_ID)" >&2; exit 2 ;;
+  *) echo "usage: run_nav_on_pc2.sh start [mc]|stop|status|log|go|estop|clear|reset|engage|released   (env: NAV_MODE=relay|full, NAV_ARGS, NAV_KILVO, NAV_ROS_DOMAIN_ID)" >&2; exit 2 ;;
 esac

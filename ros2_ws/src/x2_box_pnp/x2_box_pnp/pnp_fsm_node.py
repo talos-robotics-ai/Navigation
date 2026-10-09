@@ -1,12 +1,15 @@
 """ROS 2 wrapper around the pure PnpFsm. Pure logic lives in fsm.py / geometry.py / keyframes.py.
 
 In : /x2/odom, /x2/crate_pose, /x2/q_arm, /mpc/cmd_vel, /navigation/state, /estop,
+     /x2/walker_state (String, JSON {"phase", "engage_result"} from the walker; bring-up only),
      /pnp/start (std_srvs/Trigger service AND std_msgs/Bool topic), /pnp/reset (same)
 Out: /x2/cmd_vel_out (ALWAYS at rate_hz, zero when not moving), /x2/arm_cmd, /x2/hand_cmd,
-     /global_goal, /pnp/state
+     /global_goal, /pnp/state, /x2/walker_engage (Bool true, one-shot, bring-up only)
+Triggers (files in trigger_dir): start, reset, estop, clear, engage, released.
 
 /mpc/cmd_vel reaches /x2/cmd_vel_out only through this node (the gate).
 """
+import json
 import math
 import os
 
@@ -59,6 +62,9 @@ class PnpNode(Node):
         self.create_subscription(Twist, '/mpc/cmd_vel', self._on_planner, 10)
         self.create_subscription(String, '/navigation/state', self._on_nav, 10)
         self.create_subscription(Bool, '/estop', lambda m: setattr(self, '_estop', bool(m.data)), 10)
+        self._walker_phase = self._engage_result = None
+        self.create_subscription(String, '/x2/walker_state', self._on_walker, 10)
+        self._engage_pub = self.create_publisher(Bool, '/x2/walker_engage', 10)
         self.create_subscription(Bool, '/pnp/start', lambda m: m.data and self._start(), 10)
         self.create_subscription(Bool, '/pnp/reset', lambda m: m.data and self._fsm.request_reset(), 10)
         self.create_service(Trigger, '/pnp/start', self._srv_start)
@@ -84,7 +90,7 @@ class PnpNode(Node):
         self.get_logger().info(f'PNP: FSM up in {self._fsm.state.name} (auto_start={self._params.auto_start})')
 
     def _poll_triggers(self):
-        for name in ('estop', 'clear', 'reset', 'start'):
+        for name in ('estop', 'clear', 'reset', 'start', 'engage', 'released'):
             path = os.path.join(self._trigger_dir, name)
             if not os.path.exists(path):
                 continue
@@ -98,6 +104,10 @@ class PnpNode(Node):
                 self._estop_pub.publish(Bool(data=self._estop))
             elif name == 'reset':
                 self._fsm.request_reset()
+            elif name == 'engage':
+                self._fsm.request_engage()
+            elif name == 'released':
+                self._fsm.request_released()
             else:
                 self._start()
 
@@ -139,6 +149,14 @@ class PnpNode(Node):
     def _on_nav(self, m):
         self._nav_state = m.data
 
+    def _on_walker(self, m):
+        try:
+            d = json.loads(m.data)
+        except ValueError:
+            return
+        self._walker_phase = d.get('phase')
+        self._engage_result = d.get('engage_result')
+
     def _tick(self):
         t = self._now()
         inp = Inputs(
@@ -146,7 +164,8 @@ class PnpNode(Node):
             crate_age=math.inf if self._crate_rx is None else t - self._crate_rx,
             crate_frames=self._crate_frames, q_arm=self._q_arm, planner_cmd=self._planner,
             planner_age=math.inf if self._planner_rx is None else t - self._planner_rx,
-            nav_state=self._nav_state, estop=self._estop)
+            nav_state=self._nav_state, estop=self._estop,
+            walker_phase=self._walker_phase, engage_result=self._engage_result)
         out = self._fsm.update(inp)
         tw = Twist()
         tw.linear.x, tw.angular.z = float(out.vx), float(out.wz)      # vy = 0 always
@@ -161,6 +180,9 @@ class PnpNode(Node):
             q = g.quat_from_yaw(out.goal[2])
             gm.pose.orientation.x, gm.pose.orientation.y, gm.pose.orientation.z, gm.pose.orientation.w = q
             self._goal_pub.publish(gm)
+        if out.engage:
+            self.get_logger().info('PNP: engage sent to the walker')
+            self._engage_pub.publish(Bool(data=True))
         self._state_pub.publish(String(data=out.state.name))
 
 
