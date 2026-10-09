@@ -3,4 +3,6 @@
 pnp_fsm:
   ros__parameters:
     manipulation: false
-    auto_start: false                # start by hand: ros2 service call /pnp/start std_srvs/srv/Trigger
+    auto_start: false                # start by hand: run_nav_on_pc2.sh go
+    # file triggers (run_nav_on_pc2.sh go|reset|estop|clear): no ros2 CLI process on the vendor graph
+    trigger_dir: "~/talos_nav_ws/run"

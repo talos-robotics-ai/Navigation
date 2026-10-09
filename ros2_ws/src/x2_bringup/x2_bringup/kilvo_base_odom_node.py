@@ -134,16 +134,17 @@ class KilvoBaseOdom(Node):
     def _on_crate(self, m):
         if self._last_odom_d is None:
             return
+        # Freshness is arrival time, not header.stamp: fpose stamps with the head camera's clock,
+        # which lags the system clock by ~0.2 s and drifts (talos-objectDetection docs/x2_pc2.md).
+        # fpose publishes only while tracking, so an arriving message is a fresh one; the stamp
+        # handed on downstream is therefore the arrival time.
         now = self.get_clock().now()
-        stamp = rclpy.time.Time.from_msg(m.header.stamp)
-        if stamp.nanoseconds and (now - stamp).nanoseconds * 1e-9 > self._crate_max_age:
-            return
         p, o = m.pose.position, m.pose.orientation
         T = self.chain.crate({'position': [p.x, p.y, p.z], 'quat_xyzw': [o.x, o.y, o.z, o.w]}, self._last_odom_d)
         if T is None:
             return
         out = PoseStamped()
-        out.header.stamp, out.header.frame_id = m.header.stamp, self._odom_frame
+        out.header.stamp, out.header.frame_id = now.to_msg(), self._odom_frame
         pp, qq = se3.position(T), se3.quat(T)
         out.pose.position.x, out.pose.position.y, out.pose.position.z = map(float, pp)
         (out.pose.orientation.x, out.pose.orientation.y,

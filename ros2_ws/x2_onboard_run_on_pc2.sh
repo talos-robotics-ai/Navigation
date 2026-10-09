@@ -149,10 +149,18 @@ cmd_log() {
   exec tail -n 60 -f "$LOGDIR/${NAME}_latest.log"
 }
 
+trigger() {  # consumed by pnp_fsm within 0.2 s; no ros2 CLI process joins the vendor graph
+  mkdir -p "$HOME/talos_nav_ws/run" && touch "$HOME/talos_nav_ws/run/$1" && say "trigger: $1"
+}
+
 case "${1:-}" in
+  go) trigger start ;;
+  reset) trigger reset ;;
+  estop) trigger estop ;;
+  clear) trigger clear ;;
   start) shift; cmd_start "$@" ;;
   stop) cmd_stop ;;
   status) cmd_status ;;
   log) cmd_log ;;
-  *) echo "usage: run_nav_on_pc2.sh start [mc]|stop|status|log   (env: NAV_ARGS, NAV_KILVO, NAV_ROS_DOMAIN_ID)" >&2; exit 2 ;;
+  *) echo "usage: run_nav_on_pc2.sh start [mc]|stop|status|log|go|estop|clear|reset   (env: NAV_ARGS, NAV_KILVO, NAV_ROS_DOMAIN_ID)" >&2; exit 2 ;;
 esac

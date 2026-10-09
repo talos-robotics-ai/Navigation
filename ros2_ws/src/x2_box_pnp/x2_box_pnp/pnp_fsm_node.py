@@ -69,7 +69,35 @@ class PnpNode(Node):
         self._goal_pub = self.create_publisher(PoseStamped, '/global_goal', 10)
         self._state_pub = self.create_publisher(String, '/pnp/state', 10)
         self.create_timer(1.0 / float(self.get_parameter('rate_hz').value), self._tick)
+        # File triggers, so the operator can start/stop on PC2 without a ros2 CLI process joining
+        # the vendor DDS graph (a new participant there has made a standing X2 fall). Each file
+        # is consumed (deleted) when seen: <dir>/start, <dir>/reset, <dir>/estop, <dir>/clear.
+        self.declare_parameter('trigger_dir', '')
+        self._trigger_dir = os.path.expanduser(self.get_parameter('trigger_dir').value or '')
+        if self._trigger_dir:
+            os.makedirs(self._trigger_dir, exist_ok=True)
+            self.create_timer(0.2, self._poll_triggers)
+            self.get_logger().info(f'PNP: file triggers in {self._trigger_dir}')
         self.get_logger().info(f'PNP: FSM up in {self._fsm.state.name} (auto_start={self._params.auto_start})')
+
+    def _poll_triggers(self):
+        for name in ('estop', 'clear', 'reset', 'start'):
+            path = os.path.join(self._trigger_dir, name)
+            if not os.path.exists(path):
+                continue
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.get_logger().info(f'PNP: trigger file {name}')
+            if name == 'estop':
+                self._estop = True
+            elif name == 'clear':
+                self._estop = False
+            elif name == 'reset':
+                self._fsm.request_reset()
+            else:
+                self._start()
 
     def _start(self):
         self.get_logger().info('PNP: start requested')
