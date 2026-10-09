@@ -8,6 +8,8 @@ and sends them latest-wins. The images are sent as published (the module is moun
 handles orientation). Wire format: nav_image_proto.py. `rgb_source: compressed` forwards the vendor's own
 <ns>/rgb_image/compressed instead of re-encoding (cheaper, if the vendor publishes it).
 """
+import collections
+import struct
 import time
 
 import rclpy
@@ -38,7 +40,12 @@ class NavImageServer(Node):
         self._ns, self._dt = str(g('ns')), 1.0 / float(g('image_hz'))
         self._q, self._lvl, self._rgb_src = int(g('jpeg_quality')), int(g('png_level')), str(g('rgb_source'))
         self._subs = []
-        self._t_last = {'rgb': 0.0, 'depth': 0.0}
+        # Recent raw messages per stream, (stamp, raw): the tick encodes only an RGB/depth PAIR with the same
+        # capture stamp. (Throttling each stream on its own sent unmatched halves: the laptop paired ~1 of 2.)
+        self._buf = {'rgb': collections.deque(maxlen=6), 'depth': collections.deque(maxlen=6)}
+        self._sent_stamp = None
+        self._pair_tol = 0.012     # s; the RGB-D module stamps both from one capture
+        self.create_timer(self._dt, self._tick)
         self._info = None
         self._stat = dict(rgb=0, depth=0, rgb_in=0, depth_in=0, rgb_ms=0.0, depth_ms=0.0, rgb_b=0, depth_b=0)
         self._t_stat = time.monotonic()
@@ -80,11 +87,31 @@ class NavImageServer(Node):
             'K': [float(v) for v in m.k], 'D': [float(v) for v in m.d], 'distortion_model': m.distortion_model})
 
     def _on_img(self, kind, raw):
+        """Only buffer: the header stamp is read straight from the CDR bytes (encapsulation 4 B, then
+        builtin_interfaces/Time sec int32 + nanosec uint32), so nothing is deserialized here."""
         self._stat[kind + '_in'] += 1
-        t = time.monotonic()
-        if t - self._t_last[kind] < self._dt or self._server.link is None:
+        try:
+            sec, nsec = struct.unpack_from('<iI', raw, 4)
+        except struct.error:
             return
-        self._t_last[kind] = t
+        self._buf[kind].append((sec + nsec * 1e-9, raw))
+
+    def _tick(self):
+        if self._server.link is None or not self._buf['rgb'] or not self._buf['depth']:
+            return
+        for st_rgb, raw_rgb in reversed(self._buf['rgb']):          # newest RGB that has a depth twin
+            if self._sent_stamp is not None and st_rgb <= self._sent_stamp:
+                return
+            match = min(self._buf['depth'], key=lambda d: abs(d[0] - st_rgb))
+            if abs(match[0] - st_rgb) <= self._pair_tol:
+                self._sent_stamp = st_rgb
+                self._encode_send('rgb', raw_rgb)
+                self._encode_send('depth', match[1])
+                self._stat['pairs'] = self._stat.get('pairs', 0) + 1
+                return
+
+    def _encode_send(self, kind, raw):
+        t = time.monotonic()
         try:
             if kind == 'rgb' and self._rgb_src == 'compressed':
                 m = deserialize_message(raw, CompressedImage)
