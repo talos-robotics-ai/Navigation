@@ -28,6 +28,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.serialization import deserialize_message
 
 from . import se3
 from .odom_frames import R_IL, T_IL
@@ -61,6 +62,11 @@ class KilvoBaseOdom(Node):
         P('lidar_to_imu_R', [float(v) for v in R_IL])
         P('lidar_to_imu_t', [float(v) for v in T_IL])
         P('joint_stale_s', 2.0)
+        # CPU on PC2: KILVO publishes ~200 Hz and the HAL joint groups ~300-1000 Hz. Both are subscribed RAW
+        # (no rclpy deserialization) and only the messages actually used are decoded: odometry at most
+        # odom_max_hz (the relay sends at most 50 Hz anyway), each joint group at most joint_max_hz.
+        P('odom_max_hz', 50.0)
+        P('joint_max_hz', 25.0)
         g = lambda k: self.get_parameter(k).value  # noqa: E731
         self._odom_frame, self._base_frame = g('odom_frame'), g('base_frame')
         self._crate_max_age = float(g('crate_max_age_ms')) / 1e3
@@ -80,14 +86,17 @@ class KilvoBaseOdom(Node):
             from tf2_ros import TransformBroadcaster
             self._tf = TransformBroadcaster(self)
         # KILVO publishes RELIABLE; a BEST_EFFORT reader matches either.
-        self.create_subscription(Odometry, g('kilvo_odom_topic'), self._on_odom, BEST_EFFORT)
+        self._odom_dt = 1.0 / max(float(g('odom_max_hz')), 1e-3)
+        self._joint_dt = 1.0 / max(float(g('joint_max_hz')), 1e-3)
+        self._t_odom_rx = 0.0
+        self.create_subscription(Odometry, g('kilvo_odom_topic'), self._on_odom_raw, BEST_EFFORT, raw=True)
 
         if JointStateArray is None:
             self.get_logger().warn(f'aimdk_msgs not importable ({_AIMDK_ERR}): waist = head = 0 for the pelvis FK')
         else:
             for grp in HAL_JOINTS:
                 self.create_subscription(JointStateArray, f'/aima/hal/joint/{grp}/state',
-                                         self._joint_cb(grp), BEST_EFFORT)
+                                         self._joint_cb(grp), BEST_EFFORT, raw=True)
         self._cam_pub = self.create_publisher(PoseStamped, g('cam_out_topic'), 10) if g('cam_out_topic') else None
         self._crate_pub = None
         if g('crate_topic'):
@@ -98,10 +107,12 @@ class KilvoBaseOdom(Node):
                                f'({self._odom_frame}->{self._base_frame}), crate: {g("crate_topic") or "off"}')
 
     def _joint_cb(self, grp):
-        def cb(m):
+        def cb(raw):
             t = time.monotonic()
-            if t - self._t_joint.get(grp, 0.0) < 0.02:   # the HAL publishes ~1 kHz; waist/head move slowly
+            if t - self._t_joint.get(grp, 0.0) < self._joint_dt:   # the HAL publishes ~1 kHz; waist/head move slowly
                 return
+            self._t_joint[grp] = t                                  # also throttles a malformed stream
+            m = deserialize_message(raw, JointStateArray)
             q = joints_from_hal(grp, [j.name for j in m.joints], [j.position for j in m.joints])
             if not q:
                 self.get_logger().warn(f'{grp}: unexpected joint array ({len(m.joints)} joints)',
@@ -111,8 +122,15 @@ class KilvoBaseOdom(Node):
             self._t_joint[grp] = time.monotonic()
         return cb
 
-    def _on_odom(self, m):
+    def _on_odom_raw(self, raw):
         self._n_in += 1
+        t = time.monotonic()
+        if t - self._t_odom_rx < self._odom_dt:
+            return
+        self._t_odom_rx = t
+        self._on_odom(deserialize_message(raw, Odometry))
+
+    def _on_odom(self, m):
         d = self.chain.odom_dict(m)
         self._last_odom_d = d
         T = self.chain.base(d)
