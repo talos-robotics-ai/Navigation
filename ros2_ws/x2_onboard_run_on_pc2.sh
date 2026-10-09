@@ -6,12 +6,19 @@
 #     start        KILVO + navigation; NOTHING commands the robot (walker:=none)
 #     start mc     also the vendor-walker link (mc_velocity_node, input source talos_nav, priority 64, below
 #                  the PS5 bridge's talos_gamepad 65): the planner then walks the robot, through the pnp gate
-#   NAV_ARGS="split:=true global_planner:=true"  run_nav_on_pc2.sh start
+#   NAV_MODE=full run_nav_on_pc2.sh start        # whole planner stack ON PC2 (~1 core); default is relay
+#   NAV_ARGS="split:=true global_planner:=true"  NAV_MODE=full run_nav_on_pc2.sh start
 #   NAV_KILVO=false run_nav_on_pc2.sh start      # nav only (KILVO started some other way)
+#
+# DEFAULT (NAV_MODE=relay): PC2 runs only the cheap things -- KILVO + base odom + nav_relay_server (TCP 0.0.0.0:5596).
+# The local map, A*, MPC and the pnp FSM run on the laptop (ros2_ws/x2_laptop_run.sh), which connects to
+# 10.0.1.41:5596; its velocity commands come back through the relay as /x2/cmd_vel_out. Operator commands
+# (go/reset/estop/clear) are then given on the LAPTOP (ros2_ws/x2_nav ...); the ones below only apply in full mode.
 #
 # One `ros2 launch x2_bringup x2_onboard.launch.py` (setsid, nohup, pid file), which starts
 #   x2_leg_kinematics + KILVO   (the COPY in ~/talos_nav_ws/src/kilvo; ~/kilvo_ws is never used or touched)
-#   x2_onboard_nav, 8 s later   (base odom + local voxel map + A* + MPC: one process, one DDS participant)
+#   x2_onboard_nav, 8 s later   (relay: base odom + nav_relay_server [+ mc]; full: base odom + local voxel map
+#                                + A* + MPC + FSM; one process, one DDS participant either way)
 # on the vendor DDS graph (domain 0, vendor profile: KILVO needs it for the HAL topics).
 #
 # With plain `start` NOTHING COMMANDS THE ROBOT: /mpc/cmd_vel has no consumer. Give the planner a goal with
@@ -29,6 +36,8 @@ mkdir -p "$LOGDIR"
 VENDOR_PROFILE=/agibot/software/entry/cfg/ros_dds_configuration.xml
 NAV_ARGS="${NAV_ARGS:-}"
 NAV_KILVO="${NAV_KILVO:-true}"
+NAV_MODE="${NAV_MODE:-relay}"   # relay | full
+case "$NAV_MODE" in relay|full) ;; *) echo "NAV_MODE must be relay or full" >&2; exit 2 ;; esac
 NAME=nav
 
 say() { echo "[run_nav_on_pc2] $*"; }
@@ -86,13 +95,18 @@ cmd_start() {
   ( ros_env
     if [[ "$walker" == mc ]]; then
       say "!!!! walker:=mc -- THIS COMMANDS THE ROBOT: mc input source 'talos_nav' (priority 64; the PS5 pad, 65, overrides)."
-      say "!!!! path: /mpc/cmd_vel -> pnp_fsm gate (only after /pnp/start) -> /x2/cmd_vel_out -> mc. Robot must be in STAND_DEFAULT (pad)."
+      if [[ "$NAV_MODE" == relay ]]; then
+        say "!!!! path: LAPTOP planner -> pnp_fsm gate (only after 'x2_nav go') -> TCP 5596 -> /x2/cmd_vel_out -> mc. Robot must be in STAND_DEFAULT (pad)."
+        say "!!!! laptop gone / silent 0.3 s -> zeros, then silence."
+      else
+        say "!!!! path: /mpc/cmd_vel -> pnp_fsm gate (only after /pnp/start) -> /x2/cmd_vel_out -> mc. Robot must be in STAND_DEFAULT (pad)."
+      fi
     else
       say "walker:=none -- nothing commands the robot"
     fi
-    say "starting: ros2 launch x2_bringup x2_onboard.launch.py kilvo:=$NAV_KILVO walker:=$walker $NAV_ARGS (domain $ROS_DOMAIN_ID)"
+    say "starting: ros2 launch x2_bringup x2_onboard.launch.py kilvo:=$NAV_KILVO mode:=$NAV_MODE walker:=$walker $NAV_ARGS (domain $ROS_DOMAIN_ID)"
     # shellcheck disable=SC2086  # NAV_ARGS is a word list on purpose
-    setsid nohup ros2 launch x2_bringup x2_onboard.launch.py kilvo:="$NAV_KILVO" walker:="$walker" $NAV_ARGS \
+    setsid nohup ros2 launch x2_bringup x2_onboard.launch.py kilvo:="$NAV_KILVO" mode:="$NAV_MODE" walker:="$walker" $NAV_ARGS \
       > "$logfile" 2>&1 < /dev/null &
     echo $! > "$(pidfile $NAME)" )
   pid="$(pid_of $NAME)"
@@ -162,5 +176,5 @@ case "${1:-}" in
   stop) cmd_stop ;;
   status) cmd_status ;;
   log) cmd_log ;;
-  *) echo "usage: run_nav_on_pc2.sh start [mc]|stop|status|log|go|estop|clear|reset   (env: NAV_ARGS, NAV_KILVO, NAV_ROS_DOMAIN_ID)" >&2; exit 2 ;;
+  *) echo "usage: run_nav_on_pc2.sh start [mc]|stop|status|log|go|estop|clear|reset   (env: NAV_MODE=relay|full, NAV_ARGS, NAV_KILVO, NAV_ROS_DOMAIN_ID)" >&2; exit 2 ;;
 esac

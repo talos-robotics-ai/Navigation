@@ -2,7 +2,7 @@
 
 Kept apart so it can be unit-tested where rclpy must not be imported (PC2's vendor graph).
 """
-from .odom_frames import R_IL, T_IL, Extrinsics, base_in_odom, crate_in_odom
+from .odom_frames import R_IL, T_IL, Extrinsics, base_in_odom, cam_in_odom, crate_in_odom
 
 #: HAL group -> joint names in the HAL's array order (vhit_bridge.VENDOR; also the URDF joint names)
 HAL_JOINTS = {
@@ -57,3 +57,7 @@ class BasePoseChain:
     def crate(self, pose_d, odom_d):
         """4x4 T_odom_crate from the crate in rgbd_head_front and the KILVO IMU pose, or None."""
         return crate_in_odom(dict(pose_d, frame_id='rgbd_head_front'), dict(odom_d, frame_id='tracked'), self.ext)
+
+    def cam(self, odom_d):
+        """4x4 T_odom_cam (rgbd_head_front optical frame) from the KILVO IMU pose; same chain as crate()."""
+        return cam_in_odom(dict(odom_d, frame_id='tracked'), self.ext)

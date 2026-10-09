@@ -52,3 +52,34 @@ Deploy from the laptop with `ros2_ws/x2_onboard_deploy.sh` (rsync to PC2 `~/talo
   `deadband_mode: lift` (default): mc ignores |v| < 0.2 m/s and |wz| < 0.1 rad/s, so nonzero commands below that (above 0.03 / 0.02)
   are RAISED to the threshold (the robot moves faster than the planner asked, never slower); `zero` = the PS5 bridge's behaviour
   (stand), `none` = pass through. Stale input (> 0.3 s) -> zeros 0.3 s -> silence; `/estop` latches zeros. The FSM gate forwards vx and wz only (vy = 0).
+
+## PC2 / laptop navigation split (relay)
+
+PC2 keeps only the cheap things; the planner stack and the box detector run on the laptop.
+
+```
+PC2  (x2_onboard.launch.py mode:=relay, process x2_onboard_nav --nodes base_odom,relay,image[,mc])
+  kilvo_base_odom    /x2/odom, /x2/cam_pose (T_odom_cam, rgbd_head_front optical frame, FK), [/x2/crate_pose: crate_on_pc2:=true]
+  nav_relay_server   TCP 0.0.0.0:5596   <->  laptop nav_relay_client
+  nav_image_server   TCP 0.0.0.0:5597    ->  laptop detector (head RGB-D; idle, unsubscribed, without a client)
+laptop (x2_laptop_nav.launch.py, domain 77 localhost; ros2_ws/x2_laptop_run.sh)
+  nav_relay_client + g1_local_map + A* + MPC + pnp_fsm + crate_to_odom        operator: ros2_ws/x2_nav go|reset|estop|clear
+```
+
+Port 5596 (frames: `uint32 BE header_len, uint32 BE payload_len, JSON header, payload`; `nav_relay_proto.py`):
+PC2 -> laptop `odom|cam|crate {"t","stamp","p":[xyz],"q":[xyzw]}` (odom, cam <= 50 Hz), `cloud {"t","stamp","n"}` +
+n*3 little-endian float32 xyz in odom (KILVO scan, 6 m radius around /x2/odom, 0.1 m voxel, 2 Hz), `hb`.
+Laptop -> PC2 `cmd {"t","vx","vy","wz"}` 20 Hz (zeros if the local Twist is older than 0.3 s), `estop {"t","value"}`, `hb`.
+Safety: PC2 publishes /x2/cmd_vel_out at 20 Hz while commands are < 0.3 s old; client gone or silent 0.3 s -> zero
+Twists for 0.3 s, then nothing; mc_velocity_node adds its own stale -> zeros -> silence.
+
+Port 5597 (same framing, `nav_image_proto.py`), at most `image_hz` = 10 per stream, latest-wins, images AS PUBLISHED
+(module mounted upside down: the detector handles orientation):
+* `info {"t","frame_id","width","height","K":[9],"D","distortion_model"}` on connect + 1 Hz
+* `rgb {"t","stamp_sec","stamp_nsec","frame_id","width","height","encoding":"jpeg","src_encoding"}` payload JPEG (q80);
+  `cv2.imdecode` -> BGR (`nav_image_proto.decode_rgb`)
+* `depth {...,"encoding":"png16","unit":"mm"}` payload 16-bit PNG, mm, 0 = invalid (`decode_depth_m` -> metres float32)
+* `hb`. Sources `/aima/hal/sensor/rgbd_head_front/{rgb_image,depth_image,rgb_camera_info}`; `rgb_source: compressed`
+  forwards the vendor `rgb_image/compressed` instead of re-encoding.
+Detector pairs rgb/depth by stamp (camera clock). Its output `/fpose/crate_pose` (frame rgbd_head_front) on the laptop
+graph is turned into `/x2/crate_pose` (odom) by `crate_to_odom` using `/x2/cam_pose` at arrival - `latency_s` (0.3 s, TODO measure).

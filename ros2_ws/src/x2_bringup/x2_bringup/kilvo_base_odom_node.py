@@ -53,6 +53,7 @@ class KilvoBaseOdom(Node):
         P('crate_topic', '/fpose/crate_pose')
         P('crate_out_topic', '/x2/crate_pose')
         P('crate_max_age_ms', 500.0)
+        P('cam_out_topic', '')      # '' = off; /x2/cam_pose: T_odom_cam (rgbd_head_front), for a detector off the robot
         P('odom_frame', 'odom')
         P('base_frame', 'base_link')
         P('publish_tf', False)
@@ -87,6 +88,7 @@ class KilvoBaseOdom(Node):
             for grp in HAL_JOINTS:
                 self.create_subscription(JointStateArray, f'/aima/hal/joint/{grp}/state',
                                          self._joint_cb(grp), BEST_EFFORT)
+        self._cam_pub = self.create_publisher(PoseStamped, g('cam_out_topic'), 10) if g('cam_out_topic') else None
         self._crate_pub = None
         if g('crate_topic'):
             self._crate_pub = self.create_publisher(PoseStamped, g('crate_out_topic'), 10)
@@ -123,6 +125,13 @@ class KilvoBaseOdom(Node):
          o.pose.pose.orientation.z, o.pose.pose.orientation.w) = map(float, q)
         self._pub.publish(o)
         self._n_out += 1
+        if self._cam_pub is not None:
+            c = PoseStamped()
+            c.header.stamp, c.header.frame_id = o.header.stamp, self._odom_frame
+            pp, qq = se3.position(Tc := self.chain.cam(d)), se3.quat(Tc)
+            c.pose.position.x, c.pose.position.y, c.pose.position.z = map(float, pp)
+            (c.pose.orientation.x, c.pose.orientation.y, c.pose.orientation.z, c.pose.orientation.w) = map(float, qq)
+            self._cam_pub.publish(c)
         if self._tf:
             t = TransformStamped()
             t.header, t.child_frame_id = o.header, self._base_frame

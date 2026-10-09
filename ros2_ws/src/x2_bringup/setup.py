@@ -28,5 +28,7 @@ setup(
         'kilvo_base_odom_node = x2_bringup.kilvo_base_odom_node:main',
         'mc_velocity_node = x2_bringup.mc_velocity_node:main',
         'x2_onboard_nav = x2_bringup.onboard_nav_container:main',
+        'nav_relay_server = x2_bringup.nav_relay_server:main',
+        'nav_relay_client = x2_bringup.nav_relay_client:main',
     ]},
 )

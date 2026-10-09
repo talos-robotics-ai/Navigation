@@ -83,7 +83,7 @@ say "4/5 pure-python tests on PC2 (no rclpy)"
   export PYTHONPATH=\$PWD/pydeps:\$PWD/src/a_star_mpc_planner:\$PWD/src/g1_local_map:\$PWD/src/x2_box_pnp:\$PWD/src/x2_bringup OPENBLAS_NUM_THREADS=1 &&
   python3 -c 'import casadi, numpy, scipy; print(\"casadi\", casadi.__version__, \"numpy\", numpy.__version__, \"scipy\", scipy.__version__)' &&
   nice -n 10 python3 -m pytest -q -p no:cacheprovider src/a_star_mpc_planner/test --ignore=src/a_star_mpc_planner/test/test_slam_map_fusion.py \
-     src/g1_local_map/test src/x2_box_pnp/test src/x2_bringup/test/test_frames.py src/x2_bringup/test/test_onboard.py 2>&1 | tail -8"
+     src/g1_local_map/test src/x2_box_pnp/test src/x2_bringup/test/test_frames.py src/x2_bringup/test/test_onboard.py src/x2_bringup/test/test_nav_relay.py src/x2_bringup/test/test_nav_image.py 2>&1 | tail -8"
 
 say "5/5 run script"
 scp -q -i "$key" "$HERE/x2_onboard_run_on_pc2.sh" "$target:talos_nav_ws/run_nav_on_pc2.sh"

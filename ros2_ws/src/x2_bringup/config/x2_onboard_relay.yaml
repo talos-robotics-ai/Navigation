@@ -1,0 +1,27 @@
+# nav_relay_server (PC2, mode:=relay): TCP to the laptop planner stack. See x2_bringup/nav_relay_server.py.
+nav_relay_server:
+  ros__parameters:
+    host: 0.0.0.0
+    port: 5596
+    odom_max_hz: 50.0
+    cloud_topic: /kilvo/cloud_registered
+    cloud_hz: 2.0                    # the only cloud processing PC2 does (numpy crop + voxel)
+    cloud_voxel: 0.1
+    cloud_radius: 6.0                # around /x2/odom; the laptop planner grid half width is 6 m
+    stale_s: 0.3                     # no command for this long -> zeros for zero_tail_s, then silence
+    zero_tail_s: 0.3
+    client_silence_s: 5.0
+    max_vx: 0.5
+    max_vy: 0.3
+    max_wz: 0.5
+kilvo_base_odom:
+  ros__parameters:
+    cam_out_topic: /x2/cam_pose      # T_odom_cam (rgbd_head_front) for the laptop detector, via the relay
+nav_image_server:
+  ros__parameters:
+    port: 5597
+    ns: /aima/hal/sensor/rgbd_head_front
+    image_hz: 10.0
+    jpeg_quality: 80
+    png_level: 1                     # 16-bit PNG, mm
+    rgb_source: raw                  # compressed: forward the vendor's rgb_image/compressed untouched

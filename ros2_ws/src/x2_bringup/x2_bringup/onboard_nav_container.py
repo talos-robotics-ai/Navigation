@@ -11,6 +11,8 @@ MultiThreadedExecutor:
     mpc_node         /a_star/path + odom + obstacles                -> /mpc/cmd_vel
     pnp_fsm          the gate: /mpc/cmd_vel -> /x2/cmd_vel_out (only while navigating; zeros otherwise)
     [mc_velocity]    (--nodes ...,mc) /x2/cmd_vel_out -> vendor mc via McLocomotionVelocity: THE ONLY COMMANDER
+    [nav_relay_server]  (--nodes base_odom,relay[,mc]) PC2 relay mode: odom + crate + downsampled cloud -> laptop over TCP,
+                        laptop commands -> /x2/cmd_vel_out; the planner stack then runs on the laptop (relay_client)
     [global_planner_node]                                           -> /global_path   (--global-planner)
 
 `--nodes` picks a subset, so the same script can be started twice (two participants, two GIL's) if
@@ -30,7 +32,7 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.signals import SignalHandlerOptions
 
-ALL = ('base_odom', 'local_map', 'planner', 'fsm', 'mc')
+ALL = ('base_odom', 'local_map', 'planner', 'fsm', 'mc', 'relay', 'image', 'relay_client', 'crate_conv')
 DEFAULT = ('base_odom', 'local_map', 'planner', 'fsm')
 
 
@@ -39,6 +41,18 @@ def build_nodes(which, global_planner, node_kw):
     if 'base_odom' in which:
         from .kilvo_base_odom_node import KilvoBaseOdom
         nodes.append(KilvoBaseOdom(**node_kw))
+    if 'relay' in which:    # PC2 relay mode: odom/crate/cloud out, cmd in (nav_relay_server.py)
+        from .nav_relay_server import NavRelayServer
+        nodes.append(NavRelayServer(**node_kw))
+    if 'image' in which:    # PC2: head RGB-D on TCP 5597, subscribed only while a client is connected
+        from .nav_image_server import NavImageServer
+        nodes.append(NavImageServer(**node_kw))
+    if 'crate_conv' in which:   # laptop: detector's /fpose/crate_pose (camera frame) -> /x2/crate_pose (odom)
+        from .crate_to_odom_node import CrateToOdom
+        nodes.append(CrateToOdom(**node_kw))
+    if 'relay_client' in which:     # laptop: the other end (nav_relay_client.py)
+        from .nav_relay_client import NavRelayClient
+        nodes.append(NavRelayClient(**node_kw))
     if 'local_map' in which:
         from g1_local_map.local_voxel_map_node import LocalVoxelMapNode
         nodes.append(LocalVoxelMapNode(**node_kw))

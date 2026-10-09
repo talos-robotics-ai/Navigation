@@ -1,0 +1,23 @@
+# nav_relay_client + local map on the laptop (x2_laptop_nav.launch.py). The PC2 address is also a launch arg.
+nav_relay_client:
+  ros__parameters:
+    host: 10.0.1.41
+    port: 5596
+    cloud_topic: /kilvo/cloud_registered_ds
+    frame: odom
+    stale_s: 0.3
+local_voxel_map:
+  ros__parameters:
+    cloud_topic: /kilvo/cloud_registered_ds   # already cropped + 0.1 m voxel-downsampled at 2 Hz by PC2
+    odom_topic: /x2/odom
+    output_frame: odom
+    max_rate_hz: 0.0                 # take every relayed scan (2/s)
+    publish_costmap: false
+    half_width: 5.0
+    voxel_size: 0.10
+    persistence_s: 2.0               # 4 relayed scans of memory
+    min_range: 0.5
+    z_below: 1.0
+    z_above: 0.9
+    max_height: 1.5
+    ground_leg_offset: 0.66

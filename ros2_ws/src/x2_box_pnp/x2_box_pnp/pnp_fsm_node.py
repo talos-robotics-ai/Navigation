@@ -64,6 +64,9 @@ class PnpNode(Node):
         self.create_service(Trigger, '/pnp/start', self._srv_start)
         self.create_service(Trigger, '/pnp/reset', self._srv_reset)
         self._cmd_pub = self.create_publisher(Twist, '/x2/cmd_vel_out', 10)
+        # Operator estop/clear (file triggers) is also announced on /estop, so it reaches whatever consumes it
+        # (mc_velocity_node, the PC2 relay) and not just this FSM. We subscribe to it too: idempotent.
+        self._estop_pub = self.create_publisher(Bool, '/estop', 10)
         self._arm_pub = self.create_publisher(Float64MultiArray, '/x2/arm_cmd', 10)
         self._hand_pub = self.create_publisher(Float64MultiArray, '/x2/hand_cmd', 10)
         self._goal_pub = self.create_publisher(PoseStamped, '/global_goal', 10)
@@ -90,10 +93,9 @@ class PnpNode(Node):
             except OSError:
                 pass
             self.get_logger().info(f'PNP: trigger file {name}')
-            if name == 'estop':
-                self._estop = True
-            elif name == 'clear':
-                self._estop = False
+            if name in ('estop', 'clear'):
+                self._estop = name == 'estop'
+                self._estop_pub.publish(Bool(data=self._estop))
             elif name == 'reset':
                 self._fsm.request_reset()
             else:

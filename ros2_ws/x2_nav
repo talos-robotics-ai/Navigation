@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Operator commands for the laptop-side pnp FSM (x2_laptop_run.sh): file triggers, no ROS process started.
+#   x2_nav go|reset|estop|clear      (estop also reaches PC2's mc via /estop -> relay; clear releases it)
+DIR="${X2_NAV_RUN_DIR:-$HOME/.x2_nav/run}"
+case "${1:-}" in
+  go) f=start ;;
+  reset|estop|clear) f="$1" ;;
+  *) echo "usage: x2_nav go|reset|estop|clear   (trigger dir $DIR)" >&2; exit 2 ;;
+esac
+mkdir -p "$DIR" && touch "$DIR/$f" && echo "x2_nav: $1 ($DIR/$f)"

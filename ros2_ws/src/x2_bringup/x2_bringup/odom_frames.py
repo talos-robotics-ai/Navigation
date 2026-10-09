@@ -65,3 +65,8 @@ def crate_in_odom(crate_dict, odom_dict, ext: Extrinsics):
     if odom_dict is None:
         return None
     return _pose(odom_dict) @ ext.T_tracked_cam @ Tc
+
+
+def cam_in_odom(odom_dict, ext: Extrinsics):
+    """T_odom_cam: the head camera's optical frame (rgbd_head_front) in odom, from the KILVO IMU pose."""
+    return _pose(odom_dict) @ ext.T_tracked_cam

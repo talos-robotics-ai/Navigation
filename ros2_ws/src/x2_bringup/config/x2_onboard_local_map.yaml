@@ -6,7 +6,7 @@ local_voxel_map:
     cloud_topic: /kilvo/cloud_registered
     odom_topic: /x2/odom
     output_frame: odom               # the cloud says `camera_init`; same frame, planner-side name
-    max_rate_hz: 5.0                 # CPU: the node's python voxel dict is the cost; 5 of KILVO's ~10 scans/s
+    max_rate_hz: 2.0                 # CPU: the node's python voxel dict is the cost; 2 of KILVO's ~10 scans/s (full mode)
     publish_costmap: false           # the planner builds its own grid from the obstacle cloud
     half_width: 5.0                  # planner grid_half_width is 6.0; 5 m is plenty at walking speed
     voxel_size: 0.10
