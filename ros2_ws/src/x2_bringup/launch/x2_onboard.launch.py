@@ -62,6 +62,13 @@ def nav_processes(context):
             with open(off, 'w') as f:
                 yaml.safe_dump({'kilvo_base_odom': {'ros__parameters': {'crate_topic': ''}}}, f)
             params += ['--params-file', off]
+        ihz = LaunchConfiguration('image_hz').perform(context)
+        if ihz:
+            # head RGB-D pairs/s for the laptop box tracker (camera max 10; > ~5 needs the tracker's --mode track)
+            fhz = os.path.join(tempfile.mkdtemp(prefix='x2_onboard_'), 'image_hz.yaml')
+            with open(fhz, 'w') as f:
+                yaml.safe_dump({'nav_image_server': {'ros__parameters': {'image_hz': float(ihz)}}}, f)
+            params += ['--params-file', fhz]
         if walker == 'onrobot':
             # the relay also drives the on-robot RL walker (127.0.0.1:8770) and returns its phase to the laptop
             on = os.path.join(tempfile.mkdtemp(prefix='x2_onboard_'), 'walker_on.yaml')
@@ -117,6 +124,7 @@ def generate_launch_description():
         DeclareLaunchArgument('walker', default_value='none', description='none: NOTHING commands the robot | mc: vendor walker via mc_velocity_node | onrobot: on-robot RL walker via the relay (mode:=relay only)'),
         DeclareLaunchArgument('mode', default_value='relay', description='relay: base odom + TCP relay to the laptop planner (cheap) | full: whole stack on PC2'),
         DeclareLaunchArgument('crate_on_pc2', default_value='false', description='relay mode: keep PC2-side /fpose/crate_pose -> /x2/crate_pose (detector still on PC2)'),
+        DeclareLaunchArgument('image_hz', default_value='', description='override nav_image_server image_hz (default: config, 4)'),
         DeclareLaunchArgument('images', default_value='true', description='relay mode: head RGB-D server on :5597 (idle without a client)'),
         DeclareLaunchArgument('global_planner', default_value='false'),
         DeclareLaunchArgument('split', default_value='false', description='two nav processes instead of one'),
