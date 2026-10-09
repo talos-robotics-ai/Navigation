@@ -342,3 +342,32 @@ def test_pad_override_pauses_until_reset():
     f.request_reset()
     f.update(c.inp(robot=(0, 0, 0)))
     assert f.state == State.WAIT_FOR_BOX
+
+
+# ---------------- grasp pose fusion (SETTLE)
+
+def _qz(yaw):
+    return (0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2))
+
+
+def test_grasp_fuse_symmetry_and_noise():
+    from x2_box_pnp.grasp_pose import fuse
+    import random
+    random.seed(0)
+    poses = []
+    for i in range(9):
+        yaw = 0.3 + random.uniform(-0.02, 0.02) + (math.pi if i % 3 == 0 else 0.0)   # 180 deg flips
+        poses.append(((1.0 + random.uniform(-0.01, 0.01), 0.5, -0.9), _qz(yaw)))
+    poses.append(((5.0, 5.0, 5.0), _qz(0.3)))                                       # one outlier position
+    p, q, st = fuse(poses)
+    assert abs(p[0] - 1.0) < 0.02 and abs(p[1] - 0.5) < 1e-6                         # median ignores the outlier
+    yaw = 2 * math.atan2(q[2], q[3])
+    assert min(abs(yaw - 0.3), abs(abs(yaw - 0.3) - math.pi)) < 0.03                 # flips aligned, not averaged away
+    assert st['max_ang_dev_deg'] < 3.0 and st['n'] == 10
+
+
+def test_grasp_to_base():
+    from x2_box_pnp.grasp_pose import to_base
+    pb, qb = to_base((2.0, 1.0, -0.9), _qz(math.pi / 2), (1.0, 1.0, math.pi / 2, -0.25))
+    assert abs(pb[0] - 0.0) < 1e-9 and abs(pb[1] + 1.0) < 1e-9 and abs(pb[2] + 0.65) < 1e-9   # 1 m to the right
+    assert abs(2 * math.atan2(qb[2], qb[3])) < 1e-9

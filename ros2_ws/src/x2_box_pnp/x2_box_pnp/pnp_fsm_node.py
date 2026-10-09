@@ -7,6 +7,9 @@ Out: /x2/cmd_vel_out (ALWAYS at rate_hz, zero when not moving), /x2/arm_cmd, /x2
      /global_goal, /pnp/state, /x2/walker_engage (Bool true, one-shot, bring-up only)
      /x2/goal (PoseStamped, debug goal; frame "odom", or "crate" = relative to the crate estimate: e.g. click
      a pre-grasp pose in Foxglove's 3D panel with the display frame set to "crate"), /x2/pad_override (Bool)
+Grasp pose: while SETTLE (robot standing at the pre-grasp pose) every confirmed 6D crate pose is collected; when
+SETTLE ends they are fused (grasp_pose.fuse: median position, symmetry-aligned quaternion mean) and published
+latched on /x2/crate_grasp_pose (odom) and /x2/crate_grasp_pose_base (frame base_link: pelvis, x fwd, y left).
 TF out: odom -> crate (the FSM's averaged crate estimate), so Foxglove can display and publish in "crate".
 Triggers (files in trigger_dir): start, reset, estop, clear, engage, released.
 
@@ -26,7 +29,8 @@ from std_msgs.msg import Bool, Float64MultiArray, String
 from std_srvs.srv import Trigger
 
 from . import geometry as g
-from .fsm import Inputs, Params, PnpFsm
+from .fsm import Inputs, Params, PnpFsm, State
+from .grasp_pose import fuse, to_base
 from .keyframes import Keyframes
 
 
@@ -85,6 +89,13 @@ class PnpNode(Node):
         self._hand_pub = self.create_publisher(Float64MultiArray, '/x2/hand_cmd', 10)
         self._goal_pub = self.create_publisher(PoseStamped, '/global_goal', 10)
         self._state_pub = self.create_publisher(String, '/pnp/state', 10)
+        from rclpy.qos import DurabilityPolicy, QoSProfile
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._grasp_pub = self.create_publisher(PoseStamped, '/x2/crate_grasp_pose', latched)
+        self._grasp_base_pub = self.create_publisher(PoseStamped, '/x2/crate_grasp_pose_base', latched)
+        self._grasp_samples = []
+        self._prev_state = None
+        self._robot_z = 0.0
         self.create_timer(1.0 / float(self.get_parameter('rate_hz').value), self._tick)
         # File triggers, so the operator can start/stop on PC2 without a ros2 CLI process joining
         # the vendor DDS graph (a new participant there has made a standing X2 fall). Each file
@@ -138,10 +149,14 @@ class PnpNode(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def _on_odom(self, m):
+        self._robot_z = m.pose.pose.position.z
         o = m.pose.pose.orientation
         self._robot = (m.pose.pose.position.x, m.pose.pose.position.y, g.yaw_from_quat(o.x, o.y, o.z, o.w))
 
     def _on_crate(self, m):
+        if self._fsm.state == State.SETTLE:
+            p, q = m.pose.position, m.pose.orientation
+            self._grasp_samples.append(((p.x, p.y, p.z), (q.x, q.y, q.z, q.w)))
         o = m.pose.orientation
         self._crate = (m.pose.position.x, m.pose.position.y, g.yaw_from_quat(o.x, o.y, o.z, o.w))
         self._crate_rx = self._now()
@@ -174,6 +189,27 @@ class PnpNode(Node):
         self.get_logger().info(f'PNP: goal from /x2/goal ({frame}) -> odom ({gx:.2f}, {gy:.2f}, '
                                f'yaw {math.degrees(gyaw):.0f} deg)')
         self._fsm.request_goal((gx, gy, gyaw))
+
+    def _publish_grasp_pose(self):
+        r = fuse(self._grasp_samples)
+        if r is None or self._robot is None:
+            self.get_logger().warn('PNP: no grasp pose (no crate samples while settled)')
+            return
+        p, q, st = r
+        now = self.get_clock().now().to_msg()
+        for pub, frame, (pp, qq) in ((self._grasp_pub, 'odom', (p, q)),
+                                     (self._grasp_base_pub, 'base_link',
+                                      to_base(p, q, (self._robot[0], self._robot[1], self._robot[2], self._robot_z)))):
+            m = PoseStamped()
+            m.header.stamp, m.header.frame_id = now, frame
+            m.pose.position.x, m.pose.position.y, m.pose.position.z = map(float, pp)
+            m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z, m.pose.orientation.w = map(float, qq)
+            pub.publish(m)
+        pb, _ = to_base(p, q, (self._robot[0], self._robot[1], self._robot[2], self._robot_z))
+        self.get_logger().info(
+            f'PNP: GRASP POSE from {st["n"]} detections (spread {st["pos_std_m"] * 100:.1f} cm, '
+            f'{st["max_ang_dev_deg"]:.1f} deg): crate bottom-centre {pb[0]:+.3f} fwd {pb[1]:+.3f} left '
+            f'{pb[2]:+.3f} up of the pelvis -> /x2/crate_grasp_pose(_base)')
 
     def _publish_crate_tf(self):
         c = self._fsm._crate_est
@@ -223,6 +259,12 @@ class PnpNode(Node):
             self.get_logger().info('PNP: engage sent to the walker')
             self._engage_pub.publish(Bool(data=True))
         self._state_pub.publish(String(data=out.state.name))
+        if out.state != self._prev_state:
+            if out.state == State.SETTLE:
+                self._grasp_samples = []
+            elif self._prev_state == State.SETTLE and out.state in (State.REACH, State.DONE):
+                self._publish_grasp_pose()
+            self._prev_state = out.state
         self._publish_crate_tf()
 
 

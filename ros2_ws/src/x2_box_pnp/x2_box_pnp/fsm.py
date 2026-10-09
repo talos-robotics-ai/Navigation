@@ -155,6 +155,10 @@ class Params:
     align_too_close: float = 0.15       # closer than standoff - this: cannot back up -> FAILED
     align_timeout: float = 30.0
     settle_time: float = 1.5
+    # SETTLE also gathers the GRASP 6D pose: it ends only once this many confirmed crate detections arrived while
+    # standing still (the node fuses them into /x2/crate_grasp_pose); too few within settle_timeout -> FAILED.
+    settle_min_detections: int = 6
+    settle_timeout: float = 15.0
     # False: no arm/hand stage -- after SETTLE the task is DONE, standing (the vendor `mc` walker owns the arms)
     manipulation: bool = True
     # True: start in BRINGUP and run the teleop's hanging-to-walking handover through the walker's
@@ -217,6 +221,7 @@ class PnpFsm:
         self._released_pending = False
         self._goal_req = None               # operator goal (x, y, yaw) in odom, consumed by update()
         self._goto_turning = False
+        self._settle_f0 = 0
         self._engage_sent = False
         self._gate_seen = None              # engage_result object at the time ENGAGE was entered
         self._enter_t = 0.0
@@ -295,6 +300,8 @@ class PnpFsm:
         self._motion = None
         self._pending_goal = None
         self._align_cmd = (0.0, 0.0)
+        if self.state == State.SETTLE:
+            self._settle_f0 = inp.crate_frames
         if self.state == State.GOTO:
             self._goto_turning = False
             self._pending_goal = self._goal
@@ -414,7 +421,11 @@ class PnpFsm:
             if lost:
                 self._fire(Event.BOX_LOST, f'box not seen for {self.p.lost_timeout}s', inp)
             elif inp.t - self._enter_t >= self.p.settle_time:
-                self._fire(Event.SETTLED, f'stood still {self.p.settle_time}s', inp)
+                n = inp.crate_frames - self._settle_f0
+                if n >= self.p.settle_min_detections:
+                    self._fire(Event.SETTLED, f'stood still, {n} crate detections for the grasp pose', inp)
+                elif inp.t - self._enter_t > self.p.settle_timeout:
+                    self._fire(Event.TIMEOUT, f'only {n} crate detections in {self.p.settle_timeout}s', inp)
         elif st == State.NAV_TO_PLACE:
             self._tick_nav_place(inp)
         elif st in PLANS:
