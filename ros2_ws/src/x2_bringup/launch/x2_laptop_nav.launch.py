@@ -33,11 +33,16 @@ def processes(context):
     port = LaunchConfiguration('pc2_port').perform(context)
     detector_on_pc2 = LaunchConfiguration('detector_on_pc2').perform(context).lower() in ('true', '1')
     gp = LaunchConfiguration('global_planner').perform(context).lower() in ('true', '1')
+    walker = LaunchConfiguration('walker').perform(context).lower()
+    if walker not in ('mc', 'onrobot'):
+        raise RuntimeError(f"walker:={walker!r}: mc | onrobot")
     link_params = os.path.join(tempfile.mkdtemp(prefix='x2_laptop_'), 'link.yaml')   # last file: wins over the config
     with open(link_params, 'w') as f:
-        yaml.safe_dump({'nav_relay_client': {'ros__parameters': {'host': host, 'port': int(port)}}}, f)
-    # walker 'mc' overlay: the robot is walked by the vendor mc (sidestep allowed), same as on PC2
-    params = ['--params-file', merged_planner_params('mc'),
+        yaml.safe_dump({'nav_relay_client': {'ros__parameters': {'host': host, 'port': int(port)}},
+                        # onrobot: the FSM runs the teleop's hanging-to-walking bring-up on the walker's phases
+                        'pnp_fsm': {'ros__parameters': {'bringup': walker == 'onrobot'}}}, f)
+    # mc: the vendor mc walks the robot (sidestep allowed). onrobot: the AnyTrack policy (no vy: X2 base overlay).
+    params = ['--params-file', merged_planner_params('mc' if walker == 'mc' else 'none'),
               '--params-file', os.path.join(get_package_share_directory('x2_box_pnp'), 'config', 'pnp_params.yaml'),
               '--params-file', cfg('x2_laptop_fsm.yaml'),
               '--params-file', cfg('x2_laptop_relay_client.yaml'),
@@ -65,6 +70,7 @@ def generate_launch_description():
         DeclareLaunchArgument('pc2_port', default_value='5596'),
         DeclareLaunchArgument('detector_on_pc2', default_value='false', description='true: /x2/crate_pose comes from PC2 (no laptop crate_to_odom)'),
         DeclareLaunchArgument('global_planner', default_value='false'),
+        DeclareLaunchArgument('walker', default_value='mc', description='mc: vendor walker | onrobot: on-robot AnyTrack walker (FSM bring-up on, no vy)'),
         DeclareLaunchArgument('foxglove', default_value='true', description='foxglove_bridge on ws://localhost:8765 if installed'),
         OpaqueFunction(function=processes),
     ])
