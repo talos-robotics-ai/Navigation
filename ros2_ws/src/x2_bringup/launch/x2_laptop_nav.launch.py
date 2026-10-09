@@ -34,8 +34,8 @@ def processes(context):
     detector_on_pc2 = LaunchConfiguration('detector_on_pc2').perform(context).lower() in ('true', '1')
     gp = LaunchConfiguration('global_planner').perform(context).lower() in ('true', '1')
     walker = LaunchConfiguration('walker').perform(context).lower()
-    if walker not in ('mc', 'onrobot'):
-        raise RuntimeError(f"walker:={walker!r}: mc | onrobot")
+    if walker not in ('mc', 'onrobot', 'none'):
+        raise RuntimeError(f"walker:={walker!r}: mc | onrobot | none")
     link_params = os.path.join(tempfile.mkdtemp(prefix='x2_laptop_'), 'link.yaml')   # last file: wins over the config
     with open(link_params, 'w') as f:
         yaml.safe_dump({'nav_relay_client': {'ros__parameters': {'host': host, 'port': int(port)}},
@@ -70,7 +70,7 @@ def generate_launch_description():
         DeclareLaunchArgument('pc2_port', default_value='5596'),
         DeclareLaunchArgument('detector_on_pc2', default_value='false', description='true: /x2/crate_pose comes from PC2 (no laptop crate_to_odom)'),
         DeclareLaunchArgument('global_planner', default_value='false'),
-        DeclareLaunchArgument('walker', default_value='mc', description='mc: vendor walker | onrobot: on-robot AnyTrack walker (FSM bring-up on, no vy)'),
+        DeclareLaunchArgument('walker', default_value='mc', description='mc: vendor walker | onrobot: on-robot AnyTrack walker (FSM bring-up on, no vy) | none: watch only -- the robot is driven by something else (e.g. the PS5 pad), PC2 consumes nothing (no vy, no bring-up)'),
         DeclareLaunchArgument('foxglove', default_value='true', description='foxglove_bridge on ws://localhost:8765 if installed'),
         OpaqueFunction(function=processes),
     ])
