@@ -5,6 +5,9 @@ In : /x2/odom, /x2/crate_pose, /x2/q_arm, /mpc/cmd_vel, /navigation/state, /esto
      /pnp/start (std_srvs/Trigger service AND std_msgs/Bool topic), /pnp/reset (same)
 Out: /x2/cmd_vel_out (ALWAYS at rate_hz, zero when not moving), /x2/arm_cmd, /x2/hand_cmd,
      /global_goal, /pnp/state, /x2/walker_engage (Bool true, one-shot, bring-up only)
+     /x2/goal (PoseStamped, debug goal; frame "odom", or "crate" = relative to the crate estimate: e.g. click
+     a pre-grasp pose in Foxglove's 3D panel with the display frame set to "crate"), /x2/pad_override (Bool)
+TF out: odom -> crate (the FSM's averaged crate estimate), so Foxglove can display and publish in "crate".
 Triggers (files in trigger_dir): start, reset, estop, clear, engage, released.
 
 /mpc/cmd_vel reaches /x2/cmd_vel_out only through this node (the gate).
@@ -65,6 +68,11 @@ class PnpNode(Node):
         self._walker_phase = self._engage_result = None
         self.create_subscription(String, '/x2/walker_state', self._on_walker, 10)
         self._engage_pub = self.create_publisher(Bool, '/x2/walker_engage', 10)
+        self._manual = False
+        self.create_subscription(Bool, '/x2/pad_override', lambda m: setattr(self, '_manual', bool(m.data)), 10)
+        self.create_subscription(PoseStamped, '/x2/goal', self._on_goal, 10)
+        from tf2_ros import TransformBroadcaster
+        self._tf = TransformBroadcaster(self)
         self.create_subscription(Bool, '/pnp/start', lambda m: m.data and self._start(), 10)
         self.create_subscription(Bool, '/pnp/reset', lambda m: m.data and self._fsm.request_reset(), 10)
         self.create_service(Trigger, '/pnp/start', self._srv_start)
@@ -149,6 +157,37 @@ class PnpNode(Node):
     def _on_nav(self, m):
         self._nav_state = m.data
 
+    def _on_goal(self, m):
+        o = m.pose.orientation
+        gx, gy, gyaw = m.pose.position.x, m.pose.position.y, g.yaw_from_quat(o.x, o.y, o.z, o.w)
+        frame = (m.header.frame_id or 'odom').lstrip('/')
+        if frame == 'crate':
+            c = self._fsm._crate_est
+            if c is None:
+                self.get_logger().warn('PNP: goal in "crate" ignored: no crate estimate yet')
+                return
+            cs, sn = math.cos(c[2]), math.sin(c[2])
+            gx, gy, gyaw = c[0] + cs * gx - sn * gy, c[1] + sn * gx + cs * gy, c[2] + gyaw
+        elif frame != 'odom':
+            self.get_logger().warn(f'PNP: goal frame {frame!r} not supported (odom | crate)')
+            return
+        self.get_logger().info(f'PNP: goal from /x2/goal ({frame}) -> odom ({gx:.2f}, {gy:.2f}, '
+                               f'yaw {math.degrees(gyaw):.0f} deg)')
+        self._fsm.request_goal((gx, gy, gyaw))
+
+    def _publish_crate_tf(self):
+        c = self._fsm._crate_est
+        if c is None:
+            return
+        from geometry_msgs.msg import TransformStamped
+        t = TransformStamped()
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id, t.child_frame_id = 'odom', 'crate'
+        t.transform.translation.x, t.transform.translation.y = float(c[0]), float(c[1])
+        q = g.quat_from_yaw(c[2])
+        t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = q
+        self._tf.sendTransform(t)
+
     def _on_walker(self, m):
         try:
             d = json.loads(m.data)
@@ -165,7 +204,7 @@ class PnpNode(Node):
             crate_frames=self._crate_frames, q_arm=self._q_arm, planner_cmd=self._planner,
             planner_age=math.inf if self._planner_rx is None else t - self._planner_rx,
             nav_state=self._nav_state, estop=self._estop,
-            walker_phase=self._walker_phase, engage_result=self._engage_result)
+            walker_phase=self._walker_phase, engage_result=self._engage_result, manual=self._manual)
         out = self._fsm.update(inp)
         tw = Twist()
         tw.linear.x, tw.angular.z = float(out.vx), float(out.wz)      # vy = 0 always
@@ -184,6 +223,7 @@ class PnpNode(Node):
             self.get_logger().info('PNP: engage sent to the walker')
             self._engage_pub.publish(Bool(data=True))
         self._state_pub.publish(String(data=out.state.name))
+        self._publish_crate_tf()
 
 
 def main():

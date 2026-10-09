@@ -296,3 +296,49 @@ def test_walker_down_fails_and_reset_goes_back_to_bringup():
 def test_no_bringup_starts_waiting_for_box():
     f, _ = mk()
     assert f.state == State.WAIT_FOR_BOX
+
+
+# ---------------- operator goals (GOTO) and the pad override (MANUAL)
+
+def test_goto_drives_turns_and_stands():
+    f, logs = mk()
+    c = Clock()
+    f.request_goal((1.0, 0.0, math.pi / 2))
+    o = f.update(c.inp(robot=(0, 0, 0)))
+    assert f.state == State.GOTO and o.goal == (1.0, 0.0, math.pi / 2)
+    o = f.update(c.inp(robot=(0.5, 0, 0)))
+    assert (o.vx, o.wz) == (0.3, 0.2)                      # planner command gated through
+    o = f.update(c.inp(robot=(0.95, 0, 0)))                # position reached -> turn in place
+    o = f.update(c.inp(robot=(0.95, 0, 0)))
+    assert o.vx == 0 and o.wz > 0
+    for _ in range(10):
+        o = f.update(c.inp(robot=(0.95, 0, math.pi / 2)))
+    assert f.state == State.DONE and (o.vx, o.wz) == (0, 0)
+    f.request_goal((0.0, 0.0, 0.0))                        # a new goal from DONE
+    f.update(c.inp(robot=(0.95, 0, math.pi / 2)))
+    assert f.state == State.GOTO
+
+
+def test_goal_ignored_while_navigating_to_box():
+    f, logs = mk()
+    c = Clock()
+    to_nav(f, c)
+    f.request_goal((1, 1, 0))
+    f.update(c.inp())
+    assert f.state == State.NAV_TO_PREGRASP and any('goal ignored' in m for m in logs)
+
+
+def test_pad_override_pauses_until_reset():
+    f, _ = mk()
+    c = Clock()
+    f.request_goal((2.0, 0.0, 0.0))
+    f.update(c.inp(robot=(0, 0, 0)))
+    assert f.state == State.GOTO
+    o = f.update(c.inp(robot=(0, 0, 0), manual=True))
+    assert f.state == State.MANUAL and (o.vx, o.wz) == (0, 0)
+    for _ in range(5):
+        o = f.update(c.inp(robot=(0, 0, 0)))               # L1 released: still paused, standing
+    assert f.state == State.MANUAL and (o.vx, o.wz) == (0, 0)
+    f.request_reset()
+    f.update(c.inp(robot=(0, 0, 0)))
+    assert f.state == State.WAIT_FOR_BOX

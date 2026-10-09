@@ -36,6 +36,8 @@ class State(enum.Enum):
     BLEND = 'BLEND'
     READY = 'READY'
     WAIT_FOR_BOX = 'WAIT_FOR_BOX'
+    GOTO = 'GOTO'                       # debug: drive to an operator goal (Foxglove), turn to its heading, stand
+    MANUAL = 'MANUAL'                   # the PS5 pad took over (L1 held): navigation paused until reset
     NAV_TO_PREGRASP = 'NAV_TO_PREGRASP'
     ALIGN = 'ALIGN'
     SETTLE = 'SETTLE'
@@ -70,6 +72,8 @@ class Event(enum.Enum):
     LIVE = 'walker live'
     RELEASED = 'hook released'
     WALKER_DOWN = 'walker down'
+    GOAL = 'goal received'
+    MANUAL = 'pad override'
 
 
 S, E = State, Event
@@ -80,7 +84,8 @@ TRANSITIONS = {
     S.ENGAGE: {E.GATE_OK: S.BLEND, E.GATE_REFUSED: S.STANCE_WAIT, E.LIVE: S.READY},
     S.BLEND: {E.LIVE: S.READY},
     S.READY: {E.RELEASED: S.WAIT_FOR_BOX},
-    S.WAIT_FOR_BOX: {E.START_OK: S.NAV_TO_PREGRASP},
+    S.WAIT_FOR_BOX: {E.START_OK: S.NAV_TO_PREGRASP, E.GOAL: S.GOTO},
+    S.GOTO: {E.ARRIVED: S.DONE, E.GOAL: S.GOTO},
     S.NAV_TO_PREGRASP: {E.ARRIVED: S.ALIGN, E.BOX_LOST: S.WAIT_FOR_BOX},
     S.ALIGN: {E.ALIGNED: S.SETTLE, E.BOX_LOST: S.WAIT_FOR_BOX},
     S.SETTLE: {E.SETTLED: S.REACH, E.BOX_LOST: S.WAIT_FOR_BOX},
@@ -92,15 +97,15 @@ TRANSITIONS = {
     S.RELEASE: {E.STEP_DONE: S.RETRACT},
     S.RETRACT: {E.STEP_DONE: S.BACK_OFF},
     S.BACK_OFF: {E.STEP_DONE: S.DONE},
-    S.DONE: {}, S.FAILED: {}, S.ESTOP: {},
+    S.DONE: {E.GOAL: S.GOTO}, S.FAILED: {}, S.ESTOP: {}, S.MANUAL: {},
 }
 # Valid from any state (looked up when the state's own row has no entry).
 GLOBAL = {E.ESTOP: S.ESTOP, E.RESET: S.WAIT_FOR_BOX, E.TIMEOUT: S.FAILED, E.FAIL: S.FAILED,
-          E.WALKER_DOWN: S.FAILED}
+          E.WALKER_DOWN: S.FAILED, E.MANUAL: S.MANUAL}
 BRINGUP_STATES = (S.BRINGUP, S.STANCE_WAIT, S.ENGAGE, S.BLEND, S.READY)
 WALKER_DOWN_PHASES = ('damped', 'stopped')
 
-MOVING_STATES = (S.NAV_TO_PREGRASP, S.ALIGN, S.NAV_TO_PLACE)
+MOVING_STATES = (S.NAV_TO_PREGRASP, S.ALIGN, S.NAV_TO_PLACE, S.GOTO)
 
 # Manipulation plans: state -> ordered segments. ('arm', keyframe) | ('hands', 'closed'|'open') | ('wait', 's')
 PLANS = {
@@ -155,7 +160,11 @@ class Params:
     # True: start in BRINGUP and run the teleop's hanging-to-walking handover through the walker's
     # phases (on-robot RL walker). False: start in WAIT_FOR_BOX (vendor `mc` walker, already standing).
     bringup: bool = False
-    engage_timeout: float = 5.0         # ENGAGE: no gate verdict / blend within this -> back to STANCE_WAIT
+    engage_timeout: float = 5.0
+    # GOTO (operator goal): planner to the position, then turn in place to the goal heading
+    goto_xy_tol: float = 0.15
+    goto_yaw_tol: float = 0.10
+    goto_timeout: float = 120.0         # ENGAGE: no gate verdict / blend within this -> back to STANCE_WAIT
     # manipulation
     arm_default: List[float] = field(default_factory=lambda: [
         0.3, 0.2, 0.0, -0.8, 0.0, 0.0, 0.0, 0.3, -0.2, 0.0, -0.8, 0.0, 0.0, 0.0])
@@ -182,6 +191,7 @@ class Inputs:
     planner_age: float = math.inf
     nav_state: str = ''
     estop: bool = False
+    manual: bool = False                                   # the pad holds the walker (L1): pause navigation
     walker_phase: Optional[str] = None                     # ramp|glide|stance|blend|live|damped|stopped
     engage_result: Optional[dict] = None                   # walker's last gate verdict {verdict, reason, seq?}
 
@@ -205,6 +215,8 @@ class PnpFsm:
         self.start_pending = params.auto_start
         self._engage_pending = False
         self._released_pending = False
+        self._goal_req = None               # operator goal (x, y, yaw) in odom, consumed by update()
+        self._goto_turning = False
         self._engage_sent = False
         self._gate_seen = None              # engage_result object at the time ENGAGE was entered
         self._enter_t = 0.0
@@ -246,6 +258,10 @@ class PnpFsm:
     def request_reset(self):
         self._reset_flag = True
 
+    def request_goal(self, goal_odom):
+        """Operator goal (x, y, yaw) in odom (debug; e.g. a pre-grasp pose clicked in the crate frame)."""
+        self._goal_req = tuple(float(v) for v in goal_odom)
+
     def request_engage(self):
         """Operator: feet flat, robot upright under the gantry -> hand the legs to the policy."""
         self._engage_pending = True
@@ -279,6 +295,9 @@ class PnpFsm:
         self._motion = None
         self._pending_goal = None
         self._align_cmd = (0.0, 0.0)
+        if self.state == State.GOTO:
+            self._goto_turning = False
+            self._pending_goal = self._goal
         if self.state in (State.BRINGUP, State.STANCE_WAIT):
             self._engage_pending = False
         elif self.state == State.ENGAGE:
@@ -349,6 +368,8 @@ class PnpFsm:
         lost = (inp.crate is None) or inp.crate_age > self.p.lost_timeout
 
         # global events first
+        if inp.manual and self.state not in (State.MANUAL, State.ESTOP) and self.state not in BRINGUP_STATES:
+            self._fire(Event.MANUAL, 'PS5 pad holds the walker (L1); navigation paused until reset', inp)
         if inp.estop and self.state != State.ESTOP:
             self._fire(Event.ESTOP, 'estop asserted', inp)
         elif self._reset_flag:
@@ -362,8 +383,25 @@ class PnpFsm:
                 and self.state not in (State.FAILED, State.ESTOP, State.BRINGUP)):
             self._fire(Event.WALKER_DOWN, f'walker {inp.walker_phase}', inp)
 
+        if self._goal_req is not None:
+            goal, self._goal_req = self._goal_req, None
+            if self.state == State.GOTO:
+                self._goal, self._pending_goal, self._goto_turning = goal, goal, False
+                self._enter_t, self._aligned_since = inp.t, None
+                self.log(f'PNP: GOTO goal replaced ({goal[0]:.2f}, {goal[1]:.2f}, yaw {math.degrees(goal[2]):.0f} deg)')
+            elif self._next(Event.GOAL) == State.GOTO:
+                self._goal = goal
+                self._fire(Event.GOAL, f'operator goal ({goal[0]:.2f}, {goal[1]:.2f}, '
+                                       f'yaw {math.degrees(goal[2]):.0f} deg)', inp)
+                self._goal = goal
+                self._pending_goal = goal
+            else:
+                self.log(f'PNP: goal ignored in {self.state.name} (only from WAIT_FOR_BOX / DONE / GOTO)')
+
         st = self.state
-        if st in BRINGUP_STATES:
+        if st == State.GOTO:
+            self._tick_goto(inp)
+        elif st in BRINGUP_STATES:
             self._tick_bringup(inp)
         elif st == State.WAIT_FOR_BOX:
             if self.start_pending and self._seen >= self.p.start_frames and inp.robot is not None:
@@ -429,7 +467,13 @@ class PnpFsm:
         out = Outputs(st, arm=self._arm_hold, hand=self._hand_hold)
         if st == State.ENGAGE and not self._engage_sent:
             out.engage, self._engage_sent = True, True
-        if st in (State.NAV_TO_PREGRASP, State.NAV_TO_PLACE):
+        if st == State.GOTO:
+            out.goal, self._pending_goal = self._pending_goal, None
+            if self._goto_turning:
+                out.vx, out.wz = self._align_cmd
+            elif inp.planner_cmd is not None and inp.planner_age < self.p.planner_cmd_timeout:
+                out.vx, out.wz = max(0.0, inp.planner_cmd[0]), inp.planner_cmd[1]
+        elif st in (State.NAV_TO_PREGRASP, State.NAV_TO_PLACE):
             out.goal, self._pending_goal = self._pending_goal, None
             # the crate is static and kept in odom: walking only needs it not LOST, not freshly seen
             visible_ok = st == State.NAV_TO_PLACE or (
@@ -464,6 +508,33 @@ class PnpFsm:
             self._fire(Event.ARRIVED, f'planner reports goal reached ({d:.2f} m)', inp)
         elif inp.t - self._enter_t > self.p.nav_timeout:
             self._fire(Event.TIMEOUT, 'navigation timeout', inp)
+
+    def _tick_goto(self, inp):
+        """Planner to the goal position, then turn in place to its heading (the planner does not)."""
+        self._align_cmd = (0.0, 0.0)
+        if inp.robot is None or self._goal is None:
+            return
+        p = self.p
+        d = math.hypot(self._goal[0] - inp.robot[0], self._goal[1] - inp.robot[1])
+        if not self._goto_turning and (d < p.goto_xy_tol or
+                                       (inp.nav_state == 'GOAL_REACHED' and d < p.planner_arrive_xy)):
+            self._goto_turning = True
+            self.log(f'PNP: goal position reached ({d:.2f} m), turning to the goal heading')
+        if self._goto_turning:
+            err = math.atan2(math.sin(self._goal[2] - inp.robot[2]), math.cos(self._goal[2] - inp.robot[2]))
+            if abs(err) < p.goto_yaw_tol:
+                if self._aligned_since is None:
+                    self._aligned_since = inp.t
+                elif inp.t - self._aligned_since >= p.align_hold:
+                    self._fire(Event.ARRIVED, f'at goal ({d:.2f} m, {err:+.2f} rad)', inp)
+                return
+            self._aligned_since = None
+            wz = max(-p.align_wz_max, min(p.align_wz_max, p.align_kp_w * err))
+            if 0 < abs(wz) < p.align_wz_min:
+                wz = math.copysign(p.align_wz_min, err)
+            self._align_cmd = (0.0, wz)
+        if inp.t - self._enter_t > p.goto_timeout:
+            self._fire(Event.TIMEOUT, 'goal timeout', inp)
 
     def _tick_nav_place(self, inp):
         if inp.robot is None:

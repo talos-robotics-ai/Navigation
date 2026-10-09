@@ -42,6 +42,7 @@ class NavRelayClient(Node):
         P('frame', 'odom')
         P('stale_s', 0.3)
         P('server_silence_s', 3.0)
+        P('pad_port', 8771)         # PS5 pad override (pad_walker.py --nav); 0 = off
         g = lambda k: self.get_parameter(k).value  # noqa: E731
         self._frame, self._stale = str(g('frame')), float(g('stale_s'))
         self._silence = float(g('server_silence_s'))
@@ -64,6 +65,17 @@ class NavRelayClient(Node):
         self._walker_pub = self.create_publisher(String, '/x2/walker_state', 10)
         self.create_subscription(Bool, '/x2/walker_engage',
                                  lambda m: m.data and self._cli.send(proto.encode_frame({'t': 'engage'})), 10)
+        self._pad = None
+        self._override = None
+        self._pnp_state = ''
+        self._walker_phase = None
+        if int(g('pad_port')) > 0:
+            from .pad_input import PadInput
+            self._pad = PadInput(port=int(g('pad_port')), stale_s=float(g('stale_s')),
+                                 log=lambda m: self.get_logger().info(m))
+        self._override_pub = self.create_publisher(Bool, '/x2/pad_override', 10)
+        self.create_subscription(String, '/pnp/state', lambda m: setattr(self, '_pnp_state', m.data), 10)
+        self._t_pad_status = 0.0
         self.create_timer(1.0 / CMD_HZ, self._cmd_tick)
         self.create_timer(1.0, self._slow_tick)
         self._cli = LinkClient(str(g('host')), int(g('port')), self._on_frame, self._on_connect, self._on_close)
@@ -98,6 +110,7 @@ class NavRelayClient(Node):
                     ro.x, ro.y, ro.z, ro.w = map(float, q)
                     self._tf.sendTransform(t)
             elif kind == 'walker':
+                self._walker_phase = h.get('phase')
                 self._walker_pub.publish(String(data=json.dumps(
                     {'phase': h.get('phase'), 'engage_result': h.get('engage_result'), 'age': h.get('age')})))
             elif kind == 'cloud':
@@ -136,6 +149,24 @@ class NavRelayClient(Node):
     def _cmd_tick(self):
         c = self._cmd
         vx, vy, wz = proto.local_cmd(None if c is None else (c[0], c[1], c[2], time.monotonic() - c[3]), self._stale)
+        pad = self._pad.get() if self._pad is not None else None
+        override = pad is not None
+        if override:                                   # L1 held: the pad wins over navigation
+            vx, vy, wz = pad[0], 0.0, pad[1]
+        if override != self._override:
+            self._override = override
+            self._override_pub.publish(Bool(data=override))
+            self.get_logger().warn('PAD OVERRIDE: the pad drives, navigation paused (reset to resume)'
+                                   if override else 'pad released: the robot stands')
+        if self._pad is not None:
+            if self._pad.take_engage():
+                self._cli.send(proto.encode_frame({'t': 'engage'}))
+                self.get_logger().info('engage from the pad')
+            now = time.monotonic()
+            if now - self._t_pad_status > 0.2:
+                self._t_pad_status = now
+                self._pad.send_status(phase=self._walker_phase, pnp=self._pnp_state, override=override,
+                                      vx=round(vx, 3), wz=round(wz, 3))
         if self._cli.send(proto.cmd_frame(vx, vy, wz), replace_key='cmd'):
             self._stat['cmd'] += 1
 
@@ -160,6 +191,8 @@ class NavRelayClient(Node):
                 s[k] = 0
 
     def on_shutdown(self):
+        if self._pad is not None:
+            self._pad.close()
         self._cli.close()
 
 
