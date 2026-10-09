@@ -7,6 +7,7 @@
 Connects to host:port and reconnects forever; heartbeats at 1 Hz, a server silent for server_silence_s is dropped
 and re-dialled.
 """
+import json
 import struct
 import time
 
@@ -15,7 +16,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import Bool, Header
+from std_msgs.msg import Bool, Header, String
 
 from . import nav_relay_proto as proto
 from .nav_relay_link import LinkClient
@@ -59,6 +60,10 @@ class NavRelayClient(Node):
         self._cloud_pub = self.create_publisher(PointCloud2, g('cloud_topic'), 2)
         self.create_subscription(Twist, g('cmd_topic'), self._on_twist, 10)
         self.create_subscription(Bool, g('estop_topic'), self._on_estop, 10)
+        # on-robot walker (relay walker:=onrobot): its phase/gate verdict in, the FSM's engage out
+        self._walker_pub = self.create_publisher(String, '/x2/walker_state', 10)
+        self.create_subscription(Bool, '/x2/walker_engage',
+                                 lambda m: m.data and self._cli.send(proto.encode_frame({'t': 'engage'})), 10)
         self.create_timer(1.0 / CMD_HZ, self._cmd_tick)
         self.create_timer(1.0, self._slow_tick)
         self._cli = LinkClient(str(g('host')), int(g('port')), self._on_frame, self._on_connect, self._on_close)
@@ -92,6 +97,9 @@ class NavRelayClient(Node):
                     tr.x, tr.y, tr.z = map(float, p)
                     ro.x, ro.y, ro.z, ro.w = map(float, q)
                     self._tf.sendTransform(t)
+            elif kind == 'walker':
+                self._walker_pub.publish(String(data=json.dumps(
+                    {'phase': h.get('phase'), 'engage_result': h.get('engage_result'), 'age': h.get('age')})))
             elif kind == 'cloud':
                 n = int(h['n'])
                 proto.unpack_cloud(payload, n)   # validates the size

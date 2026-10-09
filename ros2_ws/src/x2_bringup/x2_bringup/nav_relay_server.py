@@ -7,6 +7,13 @@
                                                     to cloud_voxel, at cloud_hz: float32 xyz, odom frame)
     laptop --> TCP --> {"cmd": vx vy wz} --> /x2/cmd_vel_out (Twist, 20 Hz)   (mc_velocity_node's input)
                        {"estop": bool}   --> /estop (Bool; true is latched and re-published at 1 Hz)
+                       {"engage"}        --> walker {"engage": true}             (walker:=onrobot only)
+    walker state {"phase", "engage_result"} --> TCP --> laptop (5 Hz + on change) (walker:=onrobot only)
+
+walker:=onrobot (the on-robot RL walker, packages/x2_pnp/onrobot_walker, 127.0.0.1:8770): the held command
+also goes to the walker as {"vx", "wz"} lines at 20 Hz (vy dropped: not trained), and after the zero tail
+nothing is sent, so the walker's own 0.3 s stale guard makes it stand. /x2/cmd_vel_out is still published
+(nothing consumes it unless walker:=mc).
 
 CPU: the big cloud is subscribed RAW (no ROS deserialization of the ~10 Hz stream); only the one message per
 1/cloud_hz that is processed is deserialized, then numpy crop + voxel unique. No ROS timers faster than 20 Hz.
@@ -19,6 +26,7 @@ vanishes the robot is commanded zero for ~1.2 s in total and never anything else
 One client; a new connection replaces the old. Heartbeats both ways (1 Hz); a client silent for client_silence_s
 (5 s) is dropped. Logs one line per 5 s.
 """
+import json
 import time
 
 import numpy as np
@@ -68,6 +76,9 @@ class NavRelayServer(Node):
         P('max_vx', 0.5)
         P('max_vy', 0.3)
         P('max_wz', 0.5)
+        P('walker', '')                  # '' | 'onrobot'
+        P('walker_host', '127.0.0.1')
+        P('walker_port', 8770)
         g = lambda k: self.get_parameter(k).value  # noqa: E731
         self._odom_dt = 1.0 / float(g('odom_max_hz'))
         self._cloud_dt = 1.0 / float(g('cloud_hz'))
@@ -81,6 +92,12 @@ class NavRelayServer(Node):
         self._offsets = None
         self._stat = dict(odom=0, cam=0, crate=0, cloud=0, pts=0, cmd=0, pub=0, cloud_in=0, cloud_ms=0.0)
         self._t_stat = time.monotonic()
+        self._walker = None
+        self._walker_sent = None
+        if str(g('walker')) == 'onrobot':
+            from .walker_link import WalkerLink
+            self._walker = WalkerLink(str(g('walker_host')), int(g('walker_port')),
+                                      log=lambda m: self.get_logger().info(m))
         self._cmd_pub = self.create_publisher(Twist, g('cmd_topic'), 10)
         self._estop_pub = self.create_publisher(Bool, g('estop_topic'), LATCHED)
         self.create_subscription(Odometry, g('odom_topic'), self._on_odom, 10)
@@ -151,6 +168,9 @@ class NavRelayServer(Node):
                 pass
         elif kind == 'estop':
             self._set_estop(bool(h.get('value', True)))
+        elif kind == 'engage' and self._walker is not None:
+            ok = self._walker.send({'engage': True})
+            self.get_logger().info(f'engage forwarded to the walker (phase {self._walker.phase()}, sent={ok})')
 
     def _set_estop(self, v):
         if v != self._estop:
@@ -166,6 +186,7 @@ class NavRelayServer(Node):
         self.get_logger().warn(f'client {link.peer} gone: zero Twist for {self._hold.zero_tail_s} s, then silence')
 
     def _cmd_tick(self):
+        self._walker_tick()
         out = self._hold.step(time.monotonic(), self._estop)
         if out is None:
             return
@@ -173,6 +194,22 @@ class NavRelayServer(Node):
         tw.linear.x, tw.linear.y, tw.angular.z = out
         self._cmd_pub.publish(tw)
         self._stat['pub'] += 1
+        if self._walker is not None:
+            self._walker.send({'vx': float(out[0]), 'wz': float(out[2])})
+
+    def _walker_tick(self):
+        """Forward the walker's phase / gate verdict to the laptop: on change, else at 5 Hz."""
+        w, link = self._walker, self._server.link
+        if w is None or link is None:
+            return
+        st = w.state or {}
+        cur = {'t': 'walker', 'phase': st.get('phase') if w.connected else 'disconnected',
+               'engage_result': st.get('engage_result'), 'age': round(min(w.age(), 99.0), 2)}
+        key = (cur['phase'], json.dumps(cur['engage_result'], sort_keys=True))
+        now = time.monotonic()
+        if key != self._walker_sent or now - getattr(self, '_t_walker_tx', 0.0) > 0.2:
+            link.send(proto.encode_frame(cur), replace_key='walker')
+            self._walker_sent, self._t_walker_tx = key, now
 
     def _slow_tick(self):
         link = self._server.link
@@ -198,6 +235,8 @@ class NavRelayServer(Node):
                 s[k] = 0 if k != 'cloud_ms' else 0.0
 
     def on_shutdown(self):
+        if self._walker is not None:
+            self._walker.close()
         self._server.close()
 
 

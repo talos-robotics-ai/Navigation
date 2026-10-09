@@ -73,7 +73,8 @@ cmd_start() {
   case "${1:-}" in
     "") ;;
     mc) walker=mc ;;
-    *) echo "usage: run_nav_on_pc2.sh start [mc]" >&2; exit 2 ;;
+    onrobot) walker=onrobot ;;
+    *) echo "usage: run_nav_on_pc2.sh start [mc|onrobot]" >&2; exit 2 ;;
   esac
   if pid_alive "$(pid_of $NAME)"; then
     say "FAILED: already running (pid $(pid_of $NAME)); stop first"; exit 1
@@ -101,6 +102,9 @@ cmd_start() {
       else
         say "!!!! path: /mpc/cmd_vel -> pnp_fsm gate (only after /pnp/start) -> /x2/cmd_vel_out -> mc. Robot must be in STAND_DEFAULT (pad)."
       fi
+    elif [[ "$walker" == onrobot ]]; then
+      say "!!!! walker:=onrobot -- the relay sends vx/wz + engage to the on-robot walker (127.0.0.1:8770, ~/talos_walker)."
+      say "!!!! the walker ignores vx/wz until it is live; laptop gone / silent -> zeros, then silence -> the walker stands."
     else
       say "walker:=none -- nothing commands the robot"
     fi

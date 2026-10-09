@@ -41,11 +41,14 @@ def nav_processes(context):
     share = get_package_share_directory('x2_bringup')
     cfg = lambda n: os.path.join(share, 'config', n)  # noqa: E731
     walker = LaunchConfiguration('walker').perform(context).lower()
-    if walker not in ('none', 'mc'):
-        raise RuntimeError(f"walker:={walker!r}: none | mc")
+    if walker not in ('none', 'mc', 'onrobot'):
+        raise RuntimeError(f"walker:={walker!r}: none | mc | onrobot")
+
     mode = LaunchConfiguration('mode').perform(context).lower()
     if mode not in ('relay', 'full'):
         raise RuntimeError(f"mode:={mode!r}: relay | full")
+    if walker == 'onrobot' and mode != 'relay':
+        raise RuntimeError('walker:=onrobot needs mode:=relay (the relay is what talks to the walker)')
     gp = LaunchConfiguration('global_planner').perform(context).lower() in ('true', '1')
     if mode == 'relay':
         # PC2 keeps only the cheap things: base odom + the TCP relay (+ the mc link). The planner stack
@@ -59,6 +62,12 @@ def nav_processes(context):
             with open(off, 'w') as f:
                 yaml.safe_dump({'kilvo_base_odom': {'ros__parameters': {'crate_topic': ''}}}, f)
             params += ['--params-file', off]
+        if walker == 'onrobot':
+            # the relay also drives the on-robot RL walker (127.0.0.1:8770) and returns its phase to the laptop
+            on = os.path.join(tempfile.mkdtemp(prefix='x2_onboard_'), 'walker_on.yaml')
+            with open(on, 'w') as f:
+                yaml.safe_dump({'nav_relay_server': {'ros__parameters': {'walker': 'onrobot'}}}, f)
+            params += ['--params-file', on]
         groups = ['base_odom,relay' + (',image' if LaunchConfiguration('images').perform(context).lower() in ('true', '1') else '')
                   + (',mc' if walker == 'mc' else '')]
         gp = False
@@ -93,7 +102,7 @@ def generate_launch_description():
         DeclareLaunchArgument('kilvo', default_value='true', description='start the KILVO copy (mapping_x2.launch.py)'),
         DeclareLaunchArgument('kilvo_config', default_value='x2.yaml'),
         DeclareLaunchArgument('legs', default_value='true'),
-        DeclareLaunchArgument('walker', default_value='none', description='none: NOTHING commands the robot | mc: vendor walker via mc_velocity_node'),
+        DeclareLaunchArgument('walker', default_value='none', description='none: NOTHING commands the robot | mc: vendor walker via mc_velocity_node | onrobot: on-robot RL walker via the relay (mode:=relay only)'),
         DeclareLaunchArgument('mode', default_value='relay', description='relay: base odom + TCP relay to the laptop planner (cheap) | full: whole stack on PC2'),
         DeclareLaunchArgument('crate_on_pc2', default_value='false', description='relay mode: keep PC2-side /fpose/crate_pose -> /x2/crate_pose (detector still on PC2)'),
         DeclareLaunchArgument('images', default_value='true', description='relay mode: head RGB-D server on :5597 (idle without a client)'),
