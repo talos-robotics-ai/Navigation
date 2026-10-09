@@ -47,13 +47,18 @@ def processes(context):
               '--params-file', cfg('x2_laptop_fsm.yaml'),
               '--params-file', cfg('x2_laptop_relay_client.yaml'),
               '--params-file', link_params]
+    # quiet (default): only the state machine talks at INFO; the planner/map/relay only report problems
+    quiet = LaunchConfiguration('verbose').perform(context).lower() not in ('true', '1')
+    levels = ['--ros-args'] + sum((['--log-level', f'{n}:={lvl}'] for n, lvl in (
+        ('mpc_node', 'error'), ('a_star_node', 'warn'), ('global_planner_node', 'warn'), ('local_voxel_map', 'warn'),
+        ('nav_relay_client', 'warn'), ('crate_to_odom', 'warn'))), []) if quiet else []
     actions = [Node(package='x2_bringup', executable='x2_onboard_nav', output='screen',
                     arguments=['--nodes', 'relay_client,local_map,planner,fsm' + ('' if detector_on_pc2 else ',crate_conv'),
-                               *(['--global-planner'] if gp else []), *params])]
+                               *(['--global-planner'] if gp else []), *params, *levels])]
     if LaunchConfiguration('foxglove').perform(context).lower() in ('true', '1'):
         have = subprocess.run(['ros2', 'pkg', 'prefix', 'foxglove_bridge'], capture_output=True).returncode == 0
         if have:
-            actions.append(Node(package='foxglove_bridge', executable='foxglove_bridge', name='nav_foxglove', output='screen',
+            actions.append(Node(package='foxglove_bridge', executable='foxglove_bridge', name='nav_foxglove', output='log',
                                 parameters=[{'port': 8765, 'address': '127.0.0.1',
                                              'topic_whitelist': ['/x2/.*', '/local_voxel_map/.*', '/pnp/.*', '/mpc/.*',
                                                                  '/navigation/.*', '/global_goal', '/global_path', '/a_star/.*',
@@ -70,6 +75,7 @@ def generate_launch_description():
         DeclareLaunchArgument('pc2_port', default_value='5596'),
         DeclareLaunchArgument('detector_on_pc2', default_value='false', description='true: /x2/crate_pose comes from PC2 (no laptop crate_to_odom)'),
         DeclareLaunchArgument('global_planner', default_value='false'),
+        DeclareLaunchArgument('verbose', default_value='false', description='true: planner/map/relay INFO logs too'),
         DeclareLaunchArgument('walker', default_value='mc', description='mc: vendor walker | onrobot: on-robot AnyTrack walker (FSM bring-up on, no vy) | none: watch only -- the robot is driven by something else (e.g. the PS5 pad), PC2 consumes nothing (no vy, no bring-up)'),
         DeclareLaunchArgument('foxglove', default_value='true', description='foxglove_bridge on ws://localhost:8765 if installed'),
         OpaqueFunction(function=processes),
