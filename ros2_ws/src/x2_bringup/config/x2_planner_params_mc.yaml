@@ -1,0 +1,13 @@
+# Planner overlay for the vendor walker (`mc`), applied AFTER x2_planner_params.yaml + x2_onboard_planner.yaml
+# (x2_onboard.launch.py, walker:=mc). mc walks sideways (cap 0.3 m/s at mc_velocity_node); RoboJuDo did not.
+# The lag/G1 parameters are kept. NOTE: the pnp FSM gate forwards vx and wz only (vy = 0), so vy only
+# shapes the planner's own plan until the gate passes it on.
+/**:
+  ros__parameters:
+    mpc_vx_max: 0.4
+    mpc_vy_max: 0.15
+    mpc_omega_max: 0.4
+    mpcc_vtheta_max: 0.4
+    mpc_v_ref: 0.3
+    mpc_R_vy: 5.0                    # RoboJuDo overlay used 50 (crab-discouraging); mc may sidestep a little
+    mpcc_Q_yaw_align: 40.0           # facing the path tangent matters less when sidestep is allowed

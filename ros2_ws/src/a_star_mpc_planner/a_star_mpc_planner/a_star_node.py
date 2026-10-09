@@ -95,8 +95,9 @@ def read_xyz(msg: PointCloud2) -> np.ndarray:
 
 class AStarNode(Node):
 
-    def __init__(self):
-        super().__init__('a_star_node')
+    def __init__(self, **node_kw):
+        # node_kw: Node options (e.g. enable_rosout=False) when several nodes share one process
+        super().__init__('a_star_node', **node_kw)
 
         # ── Parameters ───────────────────────────────────────────────
         self.declare_parameter('goal_x',                5.0)
@@ -323,8 +324,11 @@ class AStarNode(Node):
         self._dlio_map_t: float = 0.0
 
         # ── TF2 (used for SLAM map frame → planner frame transform) ───
+        # Only the SLAM-map fusion looks transforms up. Without it the listener would only add
+        # /tf + /tf_static subscriptions (a cost on a shared DDS graph, e.g. the X2's PC2).
         self._tf_buffer = tf2_ros.Buffer()
-        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        self._tf_listener = (tf2_ros.TransformListener(self._tf_buffer, self)
+                             if self._enable_slam_map else None)
 
         # ── QoS ───────────────────────────────────────────────────────
         sensor_qos = QoSProfile(

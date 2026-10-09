@@ -102,8 +102,9 @@ def _wrap_angle(angle: float) -> float:
 
 class MPCNode(Node):
 
-    def __init__(self):
-        super().__init__('mpc_node')
+    def __init__(self, **node_kw):
+        # node_kw: Node options (e.g. enable_rosout=False) when several nodes share one process
+        super().__init__('mpc_node', **node_kw)
 
         # ── Parameters ───────────────────────────────────────────────
         self.declare_parameter('mpc_N',            30)

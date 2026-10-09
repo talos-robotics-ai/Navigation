@@ -1,0 +1,12 @@
+# On-robot (PC2) overlay for a_star_mpc_planner, applied AFTER planner_params_default.yaml and
+# x2_planner_params.yaml (x2_onboard.launch.py merges the three; later wins).
+# Pose: /x2/odom from kilvo_base_odom_node. Obstacles: g1_local_map fed with /kilvo/cloud_registered.
+# /mpc/cmd_vel stays on PC2: NOTHING consumes it yet (connecting it to the walking policy is a later step).
+/**:
+  ros__parameters:
+    odom_topic: /x2/odom
+    obstacle_topic: /local_voxel_map/obstacles
+    enable_slam_map: false           # also keeps a_star_node from creating a /tf listener
+    enable_dlio_map: false
+    # PC2's CPU is shared with KILVO and the box detector; the planner's pure-python A* is the cost.
+    replan_rate_hz: 2.0

@@ -1,0 +1,11 @@
+mc_velocity:
+  ros__parameters:
+    input_topic: /x2/cmd_vel_out     # the pnp FSM gate's output
+    source: talos_nav
+    priority: 64                     # < talos_gamepad 65 (PS5 pad overrides); clamped to 64 in code
+    max_vx: 0.5
+    max_vy: 0.3
+    max_wz: 0.5
+    deadband_mode: lift              # raise nonzero commands below mc's 0.2 m/s / 0.1 rad/s start thresholds
+    stale_s: 0.3
+    dry_run: false

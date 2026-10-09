@@ -24,6 +24,7 @@ pnp_fsm:
     align_hold: 0.5
     align_timeout: 30.0
     settle_time: 1.5
+    manipulation: true           # false: SETTLE -> DONE (onboard mc test: mc owns the arms)
     # policy default arm pose = X2HzdWalkDoF.default_pos arm slice (robojudo x2_hzd_policy_cfg.py)
     arm_default: [0.3, 0.2, 0.0, -0.8, 0.0, 0.0, 0.0, 0.3, -0.2, 0.0, -0.8, 0.0, 0.0, 0.0]
     arm_move_s: 3.0

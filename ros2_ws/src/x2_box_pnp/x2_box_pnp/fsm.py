@@ -113,6 +113,8 @@ class Params:
     align_too_close: float = 0.15       # closer than standoff - this: cannot back up -> FAILED
     align_timeout: float = 30.0
     settle_time: float = 1.5
+    # False: no arm/hand stage -- after SETTLE the task is DONE, standing (the vendor `mc` walker owns the arms)
+    manipulation: bool = True
     # manipulation
     arm_default: List[float] = field(default_factory=lambda: [
         0.3, 0.2, 0.0, -0.8, 0.0, 0.0, 0.0, 0.3, -0.2, 0.0, -0.8, 0.0, 0.0, 0.0])
@@ -205,6 +207,8 @@ class PnpFsm:
         nxt = self._next(event)
         if nxt is None or (nxt == self.state and event != Event.RESET):
             return False
+        if nxt == S.REACH and not self.p.manipulation:
+            nxt, reason = S.DONE, reason + '; manipulation off'
         self.log(f'PNP: {self.state.name} -> {nxt.name} ({reason})')
         prev, self.state = self.state, nxt
         self._enter(prev, inp)

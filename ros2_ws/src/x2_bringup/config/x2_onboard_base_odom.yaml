@@ -1,0 +1,7 @@
+kilvo_base_odom:
+  ros__parameters:
+    kilvo_odom_topic: /kilvo/aft_mapped_to_init
+    odom_topic: /x2/odom
+    crate_topic: /fpose/crate_pose   # '' = off. In rgbd_head_front -> /x2/crate_pose in odom (for the pnp FSM)
+    crate_out_topic: /x2/crate_pose
+    publish_tf: false                # the vendor graph has its own /tf

@@ -51,8 +51,9 @@ def _read_xyz(msg: PointCloud2) -> np.ndarray:
 
 class GlobalPlannerNode(Node):
 
-    def __init__(self):
-        super().__init__('global_planner_node')
+    def __init__(self, **node_kw):
+        # node_kw: Node options (e.g. enable_rosout=False) when several nodes share one process
+        super().__init__('global_planner_node', **node_kw)
 
         self.declare_parameter('odom_topic', '/dlio/odom_node/odom')
         self.declare_parameter('obstacle_topic', '/local_voxel_map/obstacles')

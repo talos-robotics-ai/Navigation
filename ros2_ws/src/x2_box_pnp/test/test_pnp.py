@@ -205,3 +205,13 @@ def test_default_mode_long_side_faces_robot():
     assert abs(a[0] - b[0]) < 1e-9 and abs(a[1] - b[1]) < 1e-9
     assert goal is not None
     assert abs(math.hypot(a[0] - 2, a[1]) - 0.55) < 1e-9 and a[1] * math.sin(0.3 + math.pi / 2) * 0 == 0
+
+
+def test_manipulation_off_ends_after_settle():
+    f, logs = mk(manipulation=False, settle_time=0.3)
+    c = Clock()
+    to_nav(f, c)
+    f.state = State.SETTLE
+    for _ in range(10):
+        f.update(c.inp(robot=(1.45, 0, 0)))
+    assert f.state == State.DONE and any('manipulation off' in m for m in logs)

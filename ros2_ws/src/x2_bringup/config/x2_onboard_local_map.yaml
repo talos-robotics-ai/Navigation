@@ -1,0 +1,18 @@
+# g1_local_map (local_voxel_map_node) on the X2, fed with KILVO's WORLD-frame registered scan.
+# Applied by node name, after the planner's /** file (odom_topic is the same /x2/odom).
+# The pelvis (/x2/odom) is ~0.66 m above the floor; the cloud is already in the odom frame.
+local_voxel_map:
+  ros__parameters:
+    cloud_topic: /kilvo/cloud_registered
+    odom_topic: /x2/odom
+    output_frame: odom               # the cloud says `camera_init`; same frame, planner-side name
+    max_rate_hz: 5.0                 # CPU: the node's python voxel dict is the cost; 5 of KILVO's ~10 scans/s
+    publish_costmap: false           # the planner builds its own grid from the obstacle cloud
+    half_width: 5.0                  # planner grid_half_width is 6.0; 5 m is plenty at walking speed
+    voxel_size: 0.10
+    persistence_s: 2.0
+    min_range: 0.5                   # own body and swinging arms
+    z_below: 1.0                     # reaches below the floor (pelvis - 0.66)
+    z_above: 0.9                     # pelvis + 0.9 = 1.56 m above the floor: no ceiling
+    max_height: 1.5                  # above the local ground
+    ground_leg_offset: 0.66          # pelvis height above the floor (fail-open cap)

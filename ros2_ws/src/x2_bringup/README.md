@@ -30,3 +30,25 @@ Run: `python3 tools/fake_robojudo.py &` then `../../x2_run.sh` (venv + colcon no
   pelvis, rgbd_head_front) at waist = head = 0. Check: camera sits 0.066 m forward / 0.505 m above the pelvis, optical
   axis 40 deg below level (matches vhit_camera_server's "pitched 40 deg").
 * Assumes waist joints and head yaw/pitch are ~0 (fixed params). Crate pose latency (~0.3 s) is not compensated.
+
+## On-robot (PC2): KILVO + navigation, `x2_onboard.launch.py`
+Deploy from the laptop with `ros2_ws/x2_onboard_deploy.sh` (rsync to PC2 `~/talos_nav_ws/src`, offline casadi wheel into
+`~/talos_nav_ws/pydeps`, colcon build, pure-python tests); run with `~/talos_nav_ws/run_nav_on_pc2.sh start [mc]|stop|status|log`
+(source: `ros2_ws/x2_onboard_run_on_pc2.sh`). Vendor DDS profile, default domain: KILVO needs it for the HAL topics.
+
+* `kilvo_base_odom_node` -- `/kilvo/aft_mapped_to_init` + `/aima/hal/joint/{waist,head}/state` (aimdk_msgs, BEST_EFFORT; optional
+  import: without it waist = head = 0) -> `/x2/odom` (pelvis in `odom` = KILVO's `camera_init`). Optional `/fpose/crate_pose`
+  (rgbd_head_front) -> `/x2/crate_pose` (odom). Pure logic in `onboard_chain.py`.
+* Obstacles: `g1_local_map` fed with the world-frame `/kilvo/cloud_registered` and `/x2/odom` (`config/x2_onboard_local_map.yaml`:
+  5 scans/s, 5 m window, floor removed relative to the local minimum; new optional params `max_rate_hz`, `output_frame`).
+* `a_star_node` + `mpc_node` (overlay `x2_onboard_planner.yaml`) and `pnp_fsm` (`x2_onboard_fsm.yaml`: `manipulation: false`, i.e.
+  ALIGN -> SETTLE -> DONE standing; the vendor `mc` owns the arms).
+* `onboard_nav_container.py` (`x2_onboard_nav`) runs all of these as nodes of ONE rclpy context: ONE DDS participant for the nav
+  stack (plus KILVO's own: `x2_leg_kinematics`, `kilvo`). No /rosout, no parameter services, no /tf listener.
+  `split:=true` -> two participants if one process is CPU-bound.
+* `walker:=none` (default): nothing commands the robot. `walker:=mc`: `mc_velocity_node` turns `/x2/cmd_vel_out` (the FSM gate's
+  output, never the raw planner) into `McLocomotionVelocity` for the vendor controller as input source `talos_nav`, priority 64 (below
+  the PS5 bridge's `talos_gamepad` 65: the pad overrides), no mode changes ever. Planner overlay `x2_planner_params_mc.yaml`.
+  `deadband_mode: lift` (default): mc ignores |v| < 0.2 m/s and |wz| < 0.1 rad/s, so nonzero commands below that (above 0.03 / 0.02)
+  are RAISED to the threshold (the robot moves faster than the planner asked, never slower); `zero` = the PS5 bridge's behaviour
+  (stand), `none` = pass through. Stale input (> 0.3 s) -> zeros 0.3 s -> silence; `/estop` latches zeros. The FSM gate forwards vx and wz only (vy = 0).

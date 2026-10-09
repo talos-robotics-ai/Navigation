@@ -13,6 +13,9 @@
   <depend>std_msgs</depend>
   <depend>tf2_ros</depend>
   <exec_depend>a_star_mpc_planner</exec_depend>
+  <exec_depend>g1_local_map</exec_depend>
+  <!-- also optional on the laptop: aimdk_msgs for mc_velocity_node -->
+  <!-- aimdk_msgs (waist/head joints for the onboard base odom) is optional: robot workspace only -->
   <exec_depend>x2_box_pnp</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <test_depend>python3-pytest</test_depend>

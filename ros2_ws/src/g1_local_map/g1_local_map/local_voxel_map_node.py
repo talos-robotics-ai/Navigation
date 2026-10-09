@@ -109,8 +109,9 @@ class VoxelAccumulator:
 
 
 class LocalVoxelMapNode(Node):
-    def __init__(self):
-        super().__init__("local_voxel_map")
+    def __init__(self, **node_kw):
+        # node_kw: Node options (e.g. enable_rosout=False) when several nodes share one process
+        super().__init__("local_voxel_map", **node_kw)
 
         p = self.declare_parameter
         self.cloud_topic = p("cloud_topic", "/dlio/odom_node/pointcloud/deskewed").value
@@ -127,6 +128,12 @@ class LocalVoxelMapNode(Node):
         self.persistence_s = float(p("persistence_s", 3.0).value)  # voxel memory before decay (s)
         self.min_range = float(p("min_range", 0.4).value)          # drop self-hits within this radius (m)
         self.publish_costmap = bool(p("publish_costmap", True).value)
+        # Optional (defaults keep the G1 behaviour): process at most this many scans/s (0 = every scan),
+        # and stamp the outputs with this frame instead of the cloud's own (e.g. a world cloud whose
+        # frame is not called `odom`).
+        self.max_rate_hz = float(p("max_rate_hz", 0.0).value)
+        self.output_frame = str(p("output_frame", "").value)
+        self._last_proc_s = -1e9
         self.costmap_unknown_as = int(p("costmap_unknown_as", -1).value)  # -1 unknown / 0 free
 
         # ── per-cell local-minimum ground segmentation (see ground_segmentation.py) ──
@@ -196,8 +203,12 @@ class LocalVoxelMapNode(Node):
     def _on_cloud(self, msg: PointCloud2) -> None:
         if not self.have_odom:
             return  # need the robot position to centre the rolling window
-        self.frame_id = msg.header.frame_id or "odom"
+        self.frame_id = self.output_frame or msg.header.frame_id or "odom"
         now_s = self.get_clock().now().nanoseconds * 1e-9
+        if self.max_rate_hz > 0.0:
+            if now_s - self._last_proc_s < 1.0 / self.max_rate_hz:
+                return
+            self._last_proc_s = now_s
 
         xyz = read_xyz(msg)
         cx, cy, cz = self.robot_xyz

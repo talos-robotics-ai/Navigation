@@ -25,8 +25,8 @@ from .keyframes import Keyframes
 
 
 class PnpNode(Node):
-    def __init__(self):
-        super().__init__('pnp_fsm')
+    def __init__(self, **node_kw):
+        super().__init__('pnp_fsm', **node_kw)
         defaults = Params()
         self.declare_parameter('rate_hz', 10.0)
         self.declare_parameter('keyframes_file', '')
