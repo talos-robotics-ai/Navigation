@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>x2_box_pnp</name>
+  <version>0.1.0</version>
+  <description>Box pick-and-place finite state machine for the AgiBot X2 (pure-Python FSM + rclpy wrapper).</description>
+  <maintainer email="gabriel.voss01@gmail.com">ggal</maintainer>
+  <license>MIT</license>
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

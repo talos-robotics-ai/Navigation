@@ -1,0 +1,17 @@
+# Arm keyframes, joint space, 14 values in the order of the link's `arm_names`
+# (server state: left shoulder_pitch, shoulder_roll, shoulder_yaw, elbow, wrist x3, then right x7).
+# `null` = policy default (resolved to `arm_default` in pnp_params.yaml for interpolation targets;
+# sent as arm=null to RoboJuDo while idle).
+#
+# TODO-calibrate: every non-null pose below is a PLACEHOLDER (default + a rough "arms forward")
+# and has NOT been validated on the robot. Record real poses (teleop / x2_gmt) before use.
+keyframes:
+  default: null
+  # TODO-calibrate: arms forward, elbows bent, hands apart wider than the 0.449x0.337 m box.
+  pregrasp: [0.3, 0.2, 0, -0.8, 0, 0, 0, 0.3, -0.2, 0, -0.8, 0, 0, 0]       # PLACEHOLDER (= default)
+  # TODO-calibrate: hands on the box sides.
+  grasp:    [0.3, 0.2, 0, -0.8, 0, 0, 0, 0.3, -0.2, 0, -0.8, 0, 0, 0]       # PLACEHOLDER (= default)
+  # TODO-calibrate: box lifted ~15 cm.
+  lift:     [0.3, 0.2, 0, -0.8, 0, 0, 0, 0.3, -0.2, 0, -0.8, 0, 0, 0]       # PLACEHOLDER (= default)
+  # TODO-calibrate: box on the place surface.
+  place:    [0.3, 0.2, 0, -0.8, 0, 0, 0, 0.3, -0.2, 0, -0.8, 0, 0, 0]       # PLACEHOLDER (= default)

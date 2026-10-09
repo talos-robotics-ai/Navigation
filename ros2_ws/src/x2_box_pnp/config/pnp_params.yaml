@@ -1,0 +1,37 @@
+pnp_fsm:
+  ros__parameters:
+    rate_hz: 10.0
+    auto_start: false            # true: no /pnp/start needed (not recommended on the robot)
+    start_frames: 5              # consecutive crate frames required before starting
+    standoff: 0.55               # pelvis -> crate-centre distance at the pre-grasp [m]
+    pregrasp_mode: axis          # axis (long-side face, normal toward robot) | line (robot->crate line)
+    pregrasp_axis: "y"
+    crate_avg_window: 1.0
+    goal_update_dist: 0.15
+    visible_timeout: 0.5
+    lost_timeout: 1.5            # box unseen this long in a moving state -> WAIT_FOR_BOX
+    arrive_xy: 0.15
+    arrive_yaw: 0.15
+    planner_arrive_xy: 0.35
+    nav_timeout: 120.0
+    align_kp_w: 1.0
+    align_wz_max: 0.4
+    align_wz_min: 0.0
+    align_kp_v: 0.5
+    align_vx_max: 0.15
+    align_yaw_tol: 0.08
+    align_dist_tol: 0.05
+    align_hold: 0.5
+    align_timeout: 30.0
+    settle_time: 1.5
+    # policy default arm pose = X2HzdWalkDoF.default_pos arm slice (robojudo x2_hzd_policy_cfg.py)
+    arm_default: [0.3, 0.2, 0.0, -0.8, 0.0, 0.0, 0.0, 0.3, -0.2, 0.0, -0.8, 0.0, 0.0, 0.0]
+    arm_move_s: 3.0
+    arm_tol: 0.08
+    arm_settle_timeout: 4.0
+    hand_closed: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                  1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]   # TODO-calibrate (left 10 + right 10)
+    hand_time: 1.5
+    backoff_time: 1.0
+    place_pose: [1.0, -1.0, 0.0]   # x, y, yaw in odom -- TODO set per task
+    place_xy_tol: 0.25

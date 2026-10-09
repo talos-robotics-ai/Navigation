@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>x2_bringup</name>
+  <version>0.1.0</version>
+  <description>AgiBot X2 laptop-side bring-up: RoboJuDo TCP link, dummy obstacles, planner overlay, fake RoboJuDo server.</description>
+  <maintainer email="gabriel.voss01@gmail.com">ggal</maintainer>
+  <license>MIT</license>
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>sensor_msgs_py</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
+  <exec_depend>a_star_mpc_planner</exec_depend>
+  <exec_depend>x2_box_pnp</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

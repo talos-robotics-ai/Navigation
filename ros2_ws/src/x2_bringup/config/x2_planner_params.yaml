@@ -1,0 +1,23 @@
+# Overlay for a_star_mpc_planner on the X2 (loaded AFTER planner_params_default.yaml, wins on conflicts).
+# Policy limits (robojudo X2 teleop v3): vx in [0, ~0.5], wz about +-0.5, NO lateral velocity.
+/**:
+  ros__parameters:
+    odom_topic: /x2/odom             # base_link pose in `odom` from robojudo_link_node
+    obstacle_topic: /local_voxel_map/obstacles   # dummy far point (dummy_obstacles_node)
+    # velocity envelope with margin below the policy limits
+    mpc_vx_max: 0.35
+    mpc_vy_max: 0.0                  # tracker clamps to 0.01; x2_bringup also drops vy
+    mpc_omega_max: 0.40
+    mpcc_vtheta_max: 0.40
+    mpc_v_ref: 0.25
+    mpc_R_vy: 50.0                   # strongly discourage crabbing in the cost too
+    mpcc_Q_yaw_align: 120.0          # no lateral motion -> body must face the path tangent
+    goal_heading_max_omega: 0.40
+    goal_heading_min_omega: 0.10
+    # geometry
+    robot_radius: 0.35
+    mpc_obs_r: 0.55
+    goal_reached_radius: 0.20
+    require_goal_heading: false      # ALIGN (not the planner) sets the final heading
+    # robot is not wheeled: allow the 1.5x slower rolling horizon
+    odom_timeout_sec: 0.5
