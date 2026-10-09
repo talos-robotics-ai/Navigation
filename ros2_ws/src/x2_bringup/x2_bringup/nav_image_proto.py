@@ -35,9 +35,9 @@ def encode_rgb(data, h, w, step, src_encoding, quality=80):
     return buf.tobytes()
 
 
-def encode_depth(data, h, w, step, src_encoding, level=1):
-    """16-bit PNG in millimetres from a 16UC1 (mm) or 32FC1 (m) buffer."""
-    import cv2
+def encode_depth(data, h, w, step, src_encoding, level=1, fmt='png16'):
+    """Millimetres uint16 from a 16UC1 (mm) or 32FC1 (m) buffer: fmt 'png16' (16-bit PNG, ~50 ms on the Orin at
+    1280x960) or 'raw16' (the little-endian uint16 plane as is: ~no CPU, 2.4 MB/frame -- fine on the cable)."""
     if src_encoding == '16UC1':
         mm = _plane(data, h, w, step, 1, '<u2')
     elif src_encoding == '32FC1':
@@ -45,14 +45,19 @@ def encode_depth(data, h, w, step, src_encoding, level=1):
         mm = np.where(np.isfinite(m), np.clip(np.rint(m * 1000.0), 0, 65535), 0).astype(np.uint16)
     else:
         raise ValueError(f'depth encoding {src_encoding!r}: 16UC1 | 32FC1')
+    if fmt == 'raw16':
+        return np.ascontiguousarray(mm, dtype='<u2').tobytes()
+    import cv2
     ok, buf = cv2.imencode('.png', mm, [cv2.IMWRITE_PNG_COMPRESSION, int(level)])
     if not ok:
         raise RuntimeError('png encode failed')
     return buf.tobytes()
 
 
-def decode_depth_m(payload):
-    """Laptop side helper: metres float32 from a depth frame payload."""
+def decode_depth_m(payload, header=None):
+    """Laptop side helper: metres float32 from a depth frame payload (header: its JSON header, for raw16)."""
+    if header is not None and header.get('encoding') == 'raw16':
+        return np.frombuffer(payload, '<u2').reshape(int(header['height']), int(header['width'])).astype(np.float32) * 1e-3
     import cv2
     mm = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_UNCHANGED)
     return mm.astype(np.float32) * 1e-3

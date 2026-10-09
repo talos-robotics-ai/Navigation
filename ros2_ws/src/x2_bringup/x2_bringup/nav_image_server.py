@@ -35,6 +35,7 @@ class NavImageServer(Node):
         P('image_hz', 10.0)
         P('jpeg_quality', 80)
         P('png_level', 1)
+        P('depth_format', 'raw16')        # raw16 (no CPU on PC2) | png16 (smaller, ~50 ms/frame on the Orin)
         P('rgb_source', 'raw')        # raw | compressed
         g = lambda k: self.get_parameter(k).value  # noqa: E731
         self._ns, self._dt = str(g('ns')), 1.0 / float(g('image_hz'))
@@ -123,8 +124,9 @@ class NavImageServer(Node):
                     payload = ip.encode_rgb(m.data, m.height, m.width, m.step, m.encoding, self._q)
                     hdr = {'t': 'rgb', 'encoding': 'jpeg', 'src_encoding': m.encoding}
                 else:
-                    payload = ip.encode_depth(m.data, m.height, m.width, m.step, m.encoding, self._lvl)
-                    hdr = {'t': 'depth', 'encoding': 'png16', 'unit': 'mm'}
+                    fmt = str(self.get_parameter('depth_format').value)
+                    payload = ip.encode_depth(m.data, m.height, m.width, m.step, m.encoding, self._lvl, fmt)
+                    hdr = {'t': 'depth', 'encoding': fmt, 'unit': 'mm'}
                 hdr.update(width=m.width, height=m.height)
         except Exception as e:   # noqa: BLE001 -- a bad frame must not kill the executor thread
             self.get_logger().warn(f'{kind} frame dropped: {e}', throttle_duration_sec=5)
