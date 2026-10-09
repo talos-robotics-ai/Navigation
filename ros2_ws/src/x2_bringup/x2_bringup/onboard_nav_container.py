@@ -29,7 +29,7 @@ import sys
 import signal
 
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.signals import SignalHandlerOptions
 
 ALL = ('base_odom', 'local_map', 'planner', 'fsm', 'mc', 'relay', 'image', 'relay_client', 'crate_conv')
@@ -98,7 +98,10 @@ def main(argv=None):
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node_kw = {} if a.rosout else {'enable_rosout': False, 'start_parameter_services': False}
     nodes = build_nodes(which, a.global_planner, node_kw)
-    ex = MultiThreadedExecutor(num_threads=a.threads)
+    # --threads 1: SingleThreadedExecutor. rclpy's MultiThreadedExecutor costs much more per callback, and on PC2
+    # the relay-mode process is woken ~2-3 kHz (KILVO odom ~775 Hz + HAL joint groups) even with raw subscriptions.
+    # mc_velocity (service calls) keeps the multi-threaded executor.
+    ex = SingleThreadedExecutor() if a.threads <= 1 else MultiThreadedExecutor(num_threads=a.threads)
     for n in nodes:
         ex.add_node(n)
     nodes[0].get_logger().info(f'onboard nav container: {[n.get_name() for n in nodes]} in one process '

@@ -85,7 +85,8 @@ def nav_processes(context):
             groups = ['base_odom,local_map,' + nav]
     actions = [Node(package='x2_bringup', executable='x2_onboard_nav', output='screen',
                     # No `name=`: launch_ros would add a GLOBAL `-r __node:=name` renaming every node of the process.
-                    arguments=['--nodes', nodes, *(['--global-planner'] if gp else []), *params])
+                    arguments=['--nodes', nodes, *(['--global-planner'] if gp else []),
+                               *(['--threads', '1'] if mode == 'relay' and walker != 'mc' else []), *params])
                for nodes in groups]
     if walker == 'mc':
         actions.insert(0, LogInfo(msg=LOUD_MC))
