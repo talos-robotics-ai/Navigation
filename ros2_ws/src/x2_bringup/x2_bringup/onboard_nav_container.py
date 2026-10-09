@@ -27,6 +27,7 @@ import os
 import sys
 
 import signal
+import threading
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
@@ -106,8 +107,12 @@ def main(argv=None):
         ex.add_node(n)
     nodes[0].get_logger().info(f'onboard nav container: {[n.get_name() for n in nodes]} in one process '
                                f'(one DDS participant), {a.threads} executor threads')
+    def _stop(*_):
+        # rclpy's SingleThreadedExecutor can hang in shutdown() from a signal handler: hard exit after 3 s.
+        threading.Timer(3.0, lambda: os._exit(0)).start()
+        ex.shutdown(timeout_sec=1.0)
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: ex.shutdown())
+        signal.signal(sig, _stop)
     try:
         ex.spin()
     except KeyboardInterrupt:

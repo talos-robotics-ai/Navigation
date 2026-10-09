@@ -105,7 +105,7 @@ class PnpNode(Node):
         if self._trigger_dir:
             os.makedirs(self._trigger_dir, exist_ok=True)
             self.create_timer(0.2, self._poll_triggers)
-            self.get_logger().info(f'PNP: file triggers in {self._trigger_dir}')
+            self.get_logger().debug(f'PNP: file triggers in {self._trigger_dir}')
         self.get_logger().info(f'PNP: FSM up in {self._fsm.state.name} (auto_start={self._params.auto_start})')
 
     def _poll_triggers(self):
@@ -117,7 +117,7 @@ class PnpNode(Node):
                 os.remove(path)
             except OSError:
                 pass
-            self.get_logger().info(f'PNP: trigger file {name}')
+            self.get_logger().debug(f'PNP: trigger file {name}')
             if name in ('estop', 'clear'):
                 self._estop = name == 'estop'
                 self._estop_pub.publish(Bool(data=self._estop))
@@ -131,7 +131,7 @@ class PnpNode(Node):
                 self._start()
 
     def _start(self):
-        self.get_logger().info('PNP: start requested')
+        self.get_logger().debug('PNP: start requested')
         self._fsm.request_start()
 
     def _srv_start(self, _req, resp):
@@ -256,7 +256,7 @@ class PnpNode(Node):
             gm.pose.orientation.x, gm.pose.orientation.y, gm.pose.orientation.z, gm.pose.orientation.w = q
             self._goal_pub.publish(gm)
         if out.engage:
-            self.get_logger().info('PNP: engage sent to the walker')
+            self.get_logger().debug('PNP: engage sent to the walker')
             self._engage_pub.publish(Bool(data=True))
         self._state_pub.publish(String(data=out.state.name))
         if out.state != self._prev_state:

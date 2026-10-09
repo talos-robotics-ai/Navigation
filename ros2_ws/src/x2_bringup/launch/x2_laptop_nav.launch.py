@@ -50,8 +50,8 @@ def processes(context):
     # quiet (default): only the state machine talks at INFO; the planner/map/relay only report problems
     quiet = LaunchConfiguration('verbose').perform(context).lower() not in ('true', '1')
     levels = ['--ros-args'] + sum((['--log-level', f'{n}:={lvl}'] for n, lvl in (
-        ('mpc_node', 'error'), ('a_star_node', 'warn'), ('global_planner_node', 'warn'), ('local_voxel_map', 'warn'),
-        ('nav_relay_client', 'warn'), ('crate_to_odom', 'warn'))), []) if quiet else []
+        ('mpc_node', 'error'), ('a_star_node', 'error'), ('global_planner_node', 'error'), ('local_voxel_map', 'error'),
+        ('nav_relay_client', 'error'), ('crate_to_odom', 'error'))), []) if quiet else []
     actions = [Node(package='x2_bringup', executable='x2_onboard_nav', output='screen',
                     arguments=['--nodes', 'relay_client,local_map,planner,fsm' + ('' if detector_on_pc2 else ',crate_conv'),
                                *(['--global-planner'] if gp else []), *params, *levels])]
