@@ -52,7 +52,7 @@ def processes(context):
                                 parameters=[{'port': 8765, 'address': '127.0.0.1',
                                              'topic_whitelist': ['/x2/.*', '/local_voxel_map/.*', '/pnp/.*', '/mpc/.*',
                                                                  '/navigation/.*', '/global_goal', '/global_path', '/a_star/.*',
-                                                                 '/kilvo/cloud_registered_ds', '/estop'],
+                                                                 '/kilvo/cloud_registered_ds', '/estop', '/fpose/.*', '/tf', '/tf_static'],
                                              'service_whitelist': ['^$'], 'param_whitelist': ['^$']}]))
         else:
             print('x2_laptop_nav: foxglove_bridge not installed (sudo apt install ros-jazzy-foxglove-bridge); skipping')
