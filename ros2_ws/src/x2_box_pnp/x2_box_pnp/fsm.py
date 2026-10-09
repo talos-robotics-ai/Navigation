@@ -117,7 +117,10 @@ PLANS = {
 
 @dataclass
 class Params:
-    start_frames: int = 5               # consecutive crate frames before a start is accepted
+    # The crate does not move: its pose is kept in odom and only refreshed by occasional detections (the
+    # detector may run at ~1-2 Hz). Navigation and ALIGN run on that world-frame estimate plus odometry;
+    # they need fresh detections only to correct the heading, not to keep moving.
+    start_frames: int = 2               # crate detections (consecutive, within visible_timeout) before a start
     auto_start: bool = False
     standoff: float = 0.55              # pelvis-to-crate-centre distance for the pre-grasp [m]
     # 'axis': stand on the side whose normal is the crate's `pregrasp_axis` (y = the 0.449 m long-side
@@ -125,10 +128,10 @@ class Params:
     # 'line': stand on the robot->crate line instead.
     pregrasp_mode: str = 'axis'
     pregrasp_axis: str = 'y'
-    crate_avg_window: float = 1.0       # s; crate estimate = mean of samples in this window (latency/noise)
+    crate_avg_window: float = 5.0       # s; crate estimate = mean of the DETECTIONS in this window (latency/noise)
     goal_update_dist: float = 0.15      # re-publish goal if the crate moved more than this
-    visible_timeout: float = 0.5        # no crate message for this long = not visible now
-    lost_timeout: float = 1.5           # ... for this long = lost -> WAIT_FOR_BOX
+    visible_timeout: float = 3.0        # no detection for this long = not currently seen (no goal refresh)
+    lost_timeout: float = 10.0          # ... for this long = lost -> stand (WAIT_FOR_BOX)
     arrive_xy: float = 0.15
     arrive_yaw: float = 0.15
     planner_arrive_xy: float = 0.35     # accept the planner's GOAL_REACHED only this close
@@ -335,9 +338,11 @@ class PnpFsm:
     # ---------------- main update
     def update(self, inp: Inputs) -> Outputs:
         visible = inp.crate is not None and inp.crate_age < self.p.visible_timeout
+        new = inp.crate_frames > self._last_frames
         if visible:
             self._seen += max(0, inp.crate_frames - self._last_frames)
-            self._crate_est = self._average(inp.t, inp.crate)
+            if new or self._crate_est is None:          # average detections, not ticks
+                self._crate_est = self._average(inp.t, inp.crate)
         else:
             self._seen = 0
         self._last_frames = inp.crate_frames
@@ -426,8 +431,9 @@ class PnpFsm:
             out.engage, self._engage_sent = True, True
         if st in (State.NAV_TO_PREGRASP, State.NAV_TO_PLACE):
             out.goal, self._pending_goal = self._pending_goal, None
+            # the crate is static and kept in odom: walking only needs it not LOST, not freshly seen
             visible_ok = st == State.NAV_TO_PLACE or (
-                inp.crate is not None and inp.crate_age < self.p.visible_timeout)
+                inp.crate is not None and inp.crate_age < self.p.lost_timeout)
             if (visible_ok and inp.planner_cmd is not None
                     and inp.planner_age < self.p.planner_cmd_timeout):
                 out.vx, out.wz = max(0.0, inp.planner_cmd[0]), inp.planner_cmd[1]
@@ -474,8 +480,8 @@ class PnpFsm:
         if lost:
             self._fire(Event.BOX_LOST, f'box not seen for {self.p.lost_timeout}s', inp)
             return
-        if inp.robot is None or self._crate_est is None or not visible:
-            self._aligned_since = None        # no fresh measurement: stand still
+        if inp.robot is None or self._crate_est is None:
+            self._aligned_since = None
             return
         p = self.p
         f, l, bearing, dist = g.crate_in_base(inp.robot, self._crate_est[:2])

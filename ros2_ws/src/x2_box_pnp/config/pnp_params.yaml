@@ -2,14 +2,14 @@ pnp_fsm:
   ros__parameters:
     rate_hz: 10.0
     auto_start: false            # true: no /pnp/start needed (not recommended on the robot)
-    start_frames: 5              # consecutive crate frames required before starting
+    start_frames: 2              # crate detections required before starting (detector may run at ~1-2 Hz)
     standoff: 0.55               # pelvis -> crate-centre distance at the pre-grasp [m]
     pregrasp_mode: axis          # axis (long-side face, normal toward robot) | line (robot->crate line)
     pregrasp_axis: "y"
-    crate_avg_window: 1.0
+    crate_avg_window: 5.0        # mean of the detections in this window (static crate, kept in odom)
     goal_update_dist: 0.15
-    visible_timeout: 0.5
-    lost_timeout: 1.5            # box unseen this long in a moving state -> WAIT_FOR_BOX
+    visible_timeout: 3.0         # no detection this long = not currently seen (goal not refreshed)
+    lost_timeout: 10.0           # box unseen this long in a moving state -> stand (WAIT_FOR_BOX)
     arrive_xy: 0.15
     arrive_yaw: 0.15
     planner_arrive_xy: 0.35

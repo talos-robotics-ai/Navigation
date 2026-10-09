@@ -21,7 +21,7 @@ nav_image_server:
   ros__parameters:
     port: 5597
     ns: /aima/hal/sensor/rgbd_head_front
-    image_hz: 10.0
+    image_hz: 2.0                    # low rate: the crate is static, detections only correct the heading
     jpeg_quality: 80
     png_level: 1                     # 16-bit PNG, mm
     rgb_source: raw                  # compressed: forward the vendor's rgb_image/compressed untouched

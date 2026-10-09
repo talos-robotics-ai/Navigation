@@ -63,9 +63,8 @@ def test_start_needs_n_frames():
     f, _ = mk()
     c = Clock()
     f.request_start()
-    for _ in range(4):
-        f.update(c.inp())
-    assert f.state == State.WAIT_FOR_BOX
+    f.update(c.inp())
+    assert f.state == State.WAIT_FOR_BOX          # one detection is not enough (start_frames = 2)
     f.update(c.inp())
     assert f.state == State.NAV_TO_PREGRASP
 
@@ -95,8 +94,8 @@ def test_box_lost_returns_to_wait_from_every_moving_state():
     c = Clock()
     to_nav(f, c)
     for _ in range(10):
-        o = f.update(c.inp(visible=False, age=0.6, keep=True))   # not visible, not yet lost
-    assert f.state == State.NAV_TO_PREGRASP and (o.vx, o.wz) == (0, 0)
+        o = f.update(c.inp(visible=False, age=5.0, keep=True))   # low-rate detector: not seen 5 s, not lost
+    assert f.state == State.NAV_TO_PREGRASP and (o.vx, o.wz) == (0.3, 0.2)   # keeps walking on the odom estimate
     for _ in range(10):
         o = f.update(c.inp(visible=False))
     assert f.state == State.WAIT_FOR_BOX and (o.vx, o.wz) == (0, 0)
