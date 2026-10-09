@@ -88,6 +88,17 @@ def nav_processes(context):
                     arguments=['--nodes', nodes, *(['--global-planner'] if gp else []),
                                *(['--threads', '1'] if mode == 'relay' and walker != 'mc' else []), *params])
                for nodes in groups]
+    # C++ rate limiter in front of the Python container: KILVO odom (~930 Hz) and the HAL waist/head joint groups
+    # (~1 kHz each) would otherwise wake Python thousands of times a second (100% of an Orin core).
+    actions.insert(0, Node(package='x2_throttle', executable='x2_throttle', output='screen',
+                           ros_arguments=['--disable-rosout-logs'],
+                           parameters=[{'inputs': ['/kilvo/aft_mapped_to_init', '/aima/hal/joint/waist/state',
+                                                   '/aima/hal/joint/head/state'],
+                                        'outputs': ['/x2/throttled/kilvo_odom', '/x2/throttled/joint/waist',
+                                                    '/x2/throttled/joint/head'],
+                                        'types': ['nav_msgs/msg/Odometry', 'aimdk_msgs/msg/JointStateArray',
+                                                  'aimdk_msgs/msg/JointStateArray'],
+                                        'rates': [50.0, 25.0, 25.0]}]))
     if walker == 'mc':
         actions.insert(0, LogInfo(msg=LOUD_MC))
     return actions

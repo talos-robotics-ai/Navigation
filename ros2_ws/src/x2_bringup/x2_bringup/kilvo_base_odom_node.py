@@ -66,6 +66,7 @@ class KilvoBaseOdom(Node):
         # (no rclpy deserialization) and only the messages actually used are decoded: odometry at most
         # odom_max_hz (the relay sends at most 50 Hz anyway), each joint group at most joint_max_hz.
         P('odom_max_hz', 50.0)
+        P('joint_topic_fmt', '/aima/hal/joint/{grp}/state')   # x2_throttle republishes them at 25 Hz
         P('joint_max_hz', 25.0)
         g = lambda k: self.get_parameter(k).value  # noqa: E731
         self._odom_frame, self._base_frame = g('odom_frame'), g('base_frame')
@@ -95,7 +96,7 @@ class KilvoBaseOdom(Node):
             self.get_logger().warn(f'aimdk_msgs not importable ({_AIMDK_ERR}): waist = head = 0 for the pelvis FK')
         else:
             for grp in HAL_JOINTS:
-                self.create_subscription(JointStateArray, f'/aima/hal/joint/{grp}/state',
+                self.create_subscription(JointStateArray, str(g('joint_topic_fmt')).format(grp=grp),
                                          self._joint_cb(grp), BEST_EFFORT, raw=True)
         self._cam_pub = self.create_publisher(PoseStamped, g('cam_out_topic'), 10) if g('cam_out_topic') else None
         self._crate_pub = None

@@ -35,7 +35,7 @@ while [ "$#" -gt 0 ]; do
 done
 SSH=(ssh -i "$key" -o BatchMode=yes "$target")
 RSYNC_SSH="ssh -i $key -o BatchMode=yes"
-PKGS=(a_star_mpc_planner g1_local_map x2_box_pnp x2_bringup)
+PKGS=(a_star_mpc_planner g1_local_map x2_box_pnp x2_bringup x2_throttle)
 WS='$HOME/talos_nav_ws'   # expanded on PC2
 
 CASADI_VERSION=3.8.1   # what the laptop tests ran with
